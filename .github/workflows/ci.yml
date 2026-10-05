@@ -1,0 +1,46 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (linux, ffmpeg integration)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install ffmpeg (pipeline integration tests use the synthetic source)
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - run: make lint
+      - run: make test
+
+  windows:
+    name: build + test (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build
+        shell: bash
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::8}" -o dist/windstream.exe ./cmd/windstream
+          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::8} -H=windowsgui" -o dist/windstreamw.exe ./cmd/windstream
+          cp deploy/install.ps1 deploy/uninstall.ps1 configs/windstream.example.toml dist/
+      - name: Smoke test
+        run: dist\windstream.exe version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windstream-windows-amd64
+          path: dist/

@@ -1,0 +1,19 @@
+# binaries
+/bin/
+/dist/
+/windstream
+
+# local secrets & state
+*.pem
+*.key
+*.crt
+/windstream.toml
+/acme-cache/
+/.env
+
+# tooling
+/node_modules/
+/coverage.out
+*.exe
+ViGEmClient.dll
+/logs/
