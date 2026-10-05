@@ -61,6 +61,9 @@ Default config: %s
 }
 
 func main() {
+	if platformMain(os.Args[1:]) {
+		return
+	}
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -69,6 +72,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = cmdServe(os.Args[2:])
+	case "app":
+		err = cmdApp(os.Args[2:])
 	case "check":
 		err = cmdCheck(os.Args[2:])
 	case "displays":
@@ -123,7 +128,7 @@ func newLogger(cfg config.Log) (*slog.Logger, func(), error) {
 
 func inputOptions(cfg *config.Config) input.Options {
 	return input.Options{Gamepads: cfg.Input.Gamepads, Keyboard: cfg.Input.Keyboard, Mouse: cfg.Input.Mouse,
-		MaxGamepads: cfg.Input.MaxGamepads, ViGEmClientDLL: cfg.Input.ViGEmClientDLL}
+		MaxGamepads: cfg.Input.MaxGamepads}
 }
 
 func hubConfig(cfg *config.Config, disp *display.Manager) stream.Config {
@@ -168,6 +173,9 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(cfg.Users) == 0 {
+		return errors.New("no [[users]] configured")
+	}
 	if *logFile != "" {
 		cfg.Log.File = *logFile
 	}
@@ -211,6 +219,20 @@ func cmdServe(args []string) error {
 	err = srv.Run(ctx)
 	log.Info("shutting down")
 	return err
+}
+
+// cmdApp runs the full desktop app (dashboard, dependency setup, network
+// automation) without installing it. With -dev it uses the synthetic source
+// and touches nothing on the system, which works on any OS.
+func cmdApp(args []string) error {
+	fs := flag.NewFlagSet("app", flag.ExitOnError)
+	dataDir := fs.String("data", "windstream-data", "data directory")
+	dev := fs.Bool("dev", false, "test pattern, no drivers or router changes")
+	panelAddr := fs.String("panel", defaultPanelAddr, "dashboard address (loopback)")
+	_ = fs.Parse(args)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runApp(ctx, appOptions{DataDir: *dataDir, Dev: *dev, PanelAddr: *panelAddr, Stderr: true})
 }
 
 func cmdCheck(args []string) error {

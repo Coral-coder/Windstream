@@ -19,9 +19,6 @@ type Options struct {
 	Keyboard    bool
 	Mouse       bool
 	MaxGamepads int
-	// ViGEmClientDLL is the path to ViGEmClient.dll; empty means next to the
-	// executable.
-	ViGEmClientDLL string
 }
 
 // Injector drives input for one client.

@@ -107,6 +107,9 @@ func (m *Manager) startVirtual(ctx context.Context) error {
 		}
 		m.state.weEnabledVDD = true
 		m.saveState()
+	} else if m.cfg.VirtualOwned {
+		m.state.weEnabledVDD = true // ours: switch it off again when streaming ends
+		m.saveState()
 	}
 
 	// Wait for Windows to expose the virtual monitor.

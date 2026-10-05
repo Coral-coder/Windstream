@@ -40,6 +40,20 @@ type Config struct {
 	WebRTC  WebRTC  `toml:"webrtc"`
 	Input   Input   `toml:"input"`
 	Log     Log     `toml:"log"`
+	Network Network `toml:"network"`
+}
+
+// Network configures automatic internet reachability (desktop app).
+type Network struct {
+	// UPnP asks the router to forward the ports automatically.
+	UPnP bool `toml:"upnp"`
+	// HTTPSExternalPort is the public HTTPS port. 443 lets Let's Encrypt
+	// validate with TLS-ALPN-01 and gives links without a port number.
+	HTTPSExternalPort int `toml:"https_external_port"`
+	// CustomDomain replaces the automatic <ip>.sslip.io name.
+	CustomDomain string `toml:"custom_domain"`
+	// ACMEEmail is optional (Let's Encrypt expiry notices).
+	ACMEEmail string `toml:"acme_email"`
 }
 
 // Server holds HTTP(S) listener settings.
@@ -63,9 +77,12 @@ type Server struct {
 // TLS selects the certificate source. Exactly one of cert files, ACME, or
 // self-signed must be configured.
 type TLS struct {
-	CertFile     string   `toml:"cert_file"`
-	KeyFile      string   `toml:"key_file"`
-	SelfSigned   bool     `toml:"self_signed"`
+	CertFile   string `toml:"cert_file"`
+	KeyFile    string `toml:"key_file"`
+	SelfSigned bool   `toml:"self_signed"`
+	// Auto: certificates are managed by the desktop app (Let's Encrypt for
+	// the public name, persistent self-signed for LAN).
+	Auto         bool     `toml:"auto"`
 	ACME         bool     `toml:"acme"`
 	ACMEDomains  []string `toml:"acme_domains"`
 	ACMEEmail    string   `toml:"acme_email"`
@@ -119,6 +136,9 @@ type Display struct {
 	VirtualDevice string `toml:"virtual_device"`
 	// VirtualKeepEnabled leaves the virtual monitor on when Windstream exits.
 	VirtualKeepEnabled bool `toml:"virtual_keep_enabled"`
+	// VirtualOwned (runtime only) means Windstream installed the virtual
+	// display adapter, so it may switch it off even if it found it enabled.
+	VirtualOwned bool `toml:"-"`
 	// MakePrimary makes the streamed monitor the primary display while
 	// Windstream runs, so games and Big Picture open on it. The previous
 	// primary is restored at exit.
@@ -184,9 +204,6 @@ type Input struct {
 	Keyboard    bool `toml:"keyboard"`
 	Mouse       bool `toml:"mouse"`
 	MaxGamepads int  `toml:"max_gamepads"`
-	// ViGEmClientDLL is the path to ViGEmClient.dll (gamepads need the
-	// ViGEmBus driver plus this DLL). Empty = next to windstream.exe.
-	ViGEmClientDLL string `toml:"vigem_client_dll"`
 }
 
 // Log configures logging.
@@ -217,11 +234,34 @@ func Default() Config {
 			Encoder: "auto", FPS: 60, BitrateKbps: 15000, GOPSeconds: 2,
 			FFmpegBinary: "ffmpeg", ShowCursor: true, Profile: "high",
 		},
-		Audio:  Audio{Enabled: true, Backend: "wasapi", BitrateKbps: 128},
-		WebRTC: WebRTC{UDPPort: 8444, STUNServers: []string{"stun:stun.l.google.com:19302"}},
-		Input:  Input{Enabled: true, Gamepads: true, Keyboard: true, Mouse: true, MaxGamepads: 4},
-		Log:    Log{Level: "info", Format: "text"},
+		Audio:   Audio{Enabled: true, Backend: "wasapi", BitrateKbps: 128},
+		WebRTC:  WebRTC{UDPPort: 8444, STUNServers: []string{"stun:stun.l.google.com:19302"}},
+		Input:   Input{Enabled: true, Gamepads: true, Keyboard: true, Mouse: true, MaxGamepads: 4},
+		Log:     Log{Level: "info", Format: "text"},
+		Network: Network{UPnP: true, HTTPSExternalPort: 443},
 	}
+}
+
+// AppDefaults is the configuration the desktop app starts with.
+func AppDefaults() Config {
+	c := Default()
+	c.TLS = TLS{Auto: true}
+	c.Auth.RequireTOTP = true
+	return c
+}
+
+// Save writes the configuration atomically with owner-only permissions.
+func (c *Config) Save(path string) error {
+	var b strings.Builder
+	b.WriteString("# Managed by Windstream. Use the dashboard to change settings.\n\n")
+	if err := toml.NewEncoder(&b).Encode(c); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // Load reads a TOML file over the defaults and validates the result.
@@ -293,8 +333,11 @@ func (c *Config) Validate() error {
 	if c.TLS.SelfSigned {
 		sources++
 	}
+	if c.TLS.Auto {
+		sources++
+	}
 	if sources != 1 {
-		add("exactly one TLS source must be configured: tls.cert_file+key_file, tls.acme, or tls.self_signed")
+		add("exactly one TLS source must be configured: tls.cert_file+key_file, tls.acme, tls.self_signed or tls.auto")
 	}
 
 	if c.Auth.SessionIdleTimeout.Duration <= 0 || c.Auth.SessionMaxAge.Duration <= 0 {
@@ -302,9 +345,6 @@ func (c *Config) Validate() error {
 	}
 	if c.Auth.LoginRateLimit < 1 || c.Auth.LoginRateWindow.Duration <= 0 {
 		add("auth.login_rate_limit must be >= 1 and auth.login_rate_window positive")
-	}
-	if len(c.Users) == 0 {
-		add("at least one [[users]] entry is required (see `windstream hash-password`)")
 	}
 	seen := map[string]bool{}
 	for i, u := range c.Users {
@@ -382,6 +422,9 @@ func (c *Config) Validate() error {
 	}
 	if c.WebRTC.TCPPort < 0 || c.WebRTC.TCPPort > 65535 {
 		add("webrtc.tcp_port must be 0..65535")
+	}
+	if c.Network.HTTPSExternalPort < 1 || c.Network.HTTPSExternalPort > 65535 {
+		add("network.https_external_port must be 1..65535")
 	}
 	if c.Input.MaxGamepads < 0 || c.Input.MaxGamepads > 8 {
 		add("input.max_gamepads must be 0..8")

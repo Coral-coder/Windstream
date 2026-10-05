@@ -1,0 +1,149 @@
+//go:build windows
+
+package winapp
+
+import (
+	"context"
+	_ "embed"
+	"errors"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"fyne.io/systray"
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
+
+	"github.com/coral-coder/windstream/internal/control"
+)
+
+//go:embed icon.ico
+var trayIcon []byte
+
+// RunFunc starts the controller and blocks until ctx is cancelled.
+type RunFunc func(ctx context.Context, platform control.Platform, onReady func(*control.Controller)) error
+
+type platform struct {
+	quit func()
+}
+
+func (p *platform) SteamExe() string {
+	k, err := registry.OpenKey(registry.CURRENT_USER, `Software\Valve\Steam`, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer k.Close()
+	v, _, err := k.GetStringValue("SteamExe")
+	if err != nil || v == "" {
+		return ""
+	}
+	v = strings.ReplaceAll(v, "/", `\`)
+	if _, err := os.Stat(v); err != nil {
+		return ""
+	}
+	return v
+}
+
+func (p *platform) Uninstall(removeData bool) error {
+	if err := StartUninstall(removeData); err != nil {
+		return err
+	}
+	p.quit()
+	return nil
+}
+
+func (p *platform) Quit() { p.quit() }
+
+// Resident is the long-running app started at logon: one instance per
+// session, a tray icon, and the controller underneath.
+func Resident(panelURL string, run RunFunc) error {
+	mname, _ := windows.UTF16PtrFromString(residentMutex)
+	mutex, err := windows.CreateMutex(nil, true, mname)
+	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return nil // already running in this session
+	}
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(mutex)
+	defer windows.ReleaseMutex(mutex)
+
+	ename, _ := windows.UTF16PtrFromString(quitEvent)
+	ev, err := windows.CreateEvent(nil, 1, 0, ename)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(ev)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var once sync.Once
+	done := make(chan error, 1)
+	quit := func() { once.Do(cancel) }
+	go func() {
+		_, _ = windows.WaitForSingleObject(ev, windows.INFINITE)
+		quit()
+	}()
+
+	var ctrl *control.Controller
+	var ctrlMu sync.Mutex
+	plat := &platform{quit: quit}
+
+	onReady := func() {
+		systray.SetIcon(trayIcon)
+		systray.SetTitle("Windstream")
+		systray.SetTooltip("Windstream – starting")
+		mOpen := systray.AddMenuItem("Open Windstream", "Open the dashboard")
+		mLink := systray.AddMenuItem("Open my stream link", "Open the address you play from")
+		systray.AddSeparator()
+		mQuit := systray.AddMenuItem("Quit Windstream", "Stop streaming and close")
+		systray.SetOnTapped(func() { openURL(panelURL) })
+
+		go func() {
+			done <- run(ctx, plat, func(c *control.Controller) {
+				ctrlMu.Lock()
+				ctrl = c
+				ctrlMu.Unlock()
+			})
+			systray.Quit()
+		}()
+		go func() {
+			t := time.NewTicker(5 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-mOpen.ClickedCh:
+					openURL(panelURL)
+				case <-mLink.ClickedCh:
+					ctrlMu.Lock()
+					c := ctrl
+					ctrlMu.Unlock()
+					if c != nil && c.Link() != "" {
+						openURL(c.Link())
+					} else {
+						openURL(panelURL)
+					}
+				case <-mQuit.ClickedCh:
+					quit()
+				case <-t.C:
+					ctrlMu.Lock()
+					c := ctrl
+					ctrlMu.Unlock()
+					if c != nil {
+						systray.SetTooltip(c.TrayStatus())
+					}
+				}
+			}
+		}()
+	}
+	systray.Run(onReady, func() { quit() })
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(15 * time.Second):
+		return nil
+	}
+}

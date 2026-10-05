@@ -22,7 +22,7 @@ jobs:
       - run: make test
 
   windows:
-    name: build + test (windows)
+    name: build Windstream.exe (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,14 +33,11 @@ jobs:
       - run: go test ./...
       - name: Build
         shell: bash
-        run: |
-          mkdir -p dist
-          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::8}" -o dist/windstream.exe ./cmd/windstream
-          go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::8} -H=windowsgui" -o dist/windstreamw.exe ./cmd/windstream
-          cp deploy/install.ps1 deploy/uninstall.ps1 configs/windstream.example.toml dist/
-      - name: Smoke test
-        run: dist\windstream.exe version
+        run: go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::8} -H=windowsgui" -o Windstream.exe ./cmd/windstream
+      - name: Smoke test (CLI attaches to the console)
+        shell: bash
+        run: ./Windstream.exe version
       - uses: actions/upload-artifact@v4
         with:
-          name: windstream-windows-amd64
-          path: dist/
+          name: Windstream
+          path: Windstream.exe

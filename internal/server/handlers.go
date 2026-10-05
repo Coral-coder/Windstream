@@ -91,13 +91,11 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user": sess.User,
-		"display": map[string]int{
-			"width": s.cfg.Display.Width, "height": s.cfg.Display.Height, "fps": s.cfg.Video.FPS,
-		},
-		"stream": s.hub.Stats(),
-	})
+	resp := map[string]any{"user": sess.User}
+	if h := s.hub.Load(); h != nil {
+		resp["stream"] = h.Stats()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
@@ -127,7 +125,13 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 		defer wcancel()
 		return wsjson.Write(wctx, conn, m)
 	}
-	client, err := s.hub.Connect(sess.User, s.clientIP(r), send)
+	hub := s.hub.Load()
+	if hub == nil {
+		_ = send(stream.SignalMessage{Type: "error", Message: "The streaming engine is starting up. Retrying…"})
+		conn.Close(websocket.StatusTryAgainLater, "starting")
+		return
+	}
+	client, err := hub.Connect(sess.User, s.clientIP(r), send)
 	if err != nil {
 		s.log.Warn("stream connect refused", "user", sess.User, "error", err)
 		_ = send(stream.SignalMessage{Type: "error", Message: err.Error()})

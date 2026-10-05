@@ -27,7 +27,7 @@ type winInjector struct {
 func newPlatform(opts Options, log *slog.Logger) (Injector, error) {
 	inj := &winInjector{opts: opts, log: log, pads: map[int]*x360Pad{}, keys: map[string]bool{}, buttons: map[uint8]bool{}}
 	if opts.Gamepads {
-		v, err := newViGEmClient(opts.ViGEmClientDLL)
+		v, err := newViGEmClient()
 		if err != nil {
 			inj.padErr = err
 			return inj, fmt.Errorf("gamepads unavailable (keyboard and mouse still work): %w", err)
@@ -43,7 +43,7 @@ func platformCheck(opts Options) Probe {
 		p.KeyboardMouse = err
 	}
 	if opts.Gamepads {
-		v, err := newViGEmClient(opts.ViGEmClientDLL)
+		v, err := newViGEmClient()
 		if err != nil {
 			p.Gamepads = err
 		} else {

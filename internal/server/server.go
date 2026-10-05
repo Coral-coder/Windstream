@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
@@ -34,30 +35,52 @@ type Server struct {
 	auth     *auth.Authenticator
 	sessions *auth.SessionStore
 	limiter  *auth.Limiter
-	hub      *stream.Hub
+	hub      atomic.Pointer[stream.Hub]
 	handler  http.Handler
 	tlsCfg   *tls.Config
 	acme     *autocert.Manager
+	getCert  func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	origins  map[string]bool
 }
 
-// New wires the handlers and TLS configuration.
-func New(cfg *config.Config, hub *stream.Hub, log *slog.Logger) (*Server, error) {
-	users := make([]auth.User, 0, len(cfg.Users))
-	for _, u := range cfg.Users {
-		users = append(users, auth.User{Name: u.Name, PasswordHash: u.PasswordHash, TOTPSecret: u.TOTPSecret})
+// Options lets a long-running host (the desktop app) share state across
+// server restarts and supply certificates.
+type Options struct {
+	Auth     *auth.Authenticator
+	Sessions *auth.SessionStore
+	Limiter  *auth.Limiter
+	// GetCertificate overrides the [tls] config section (used by AutoTLS).
+	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+}
+
+// New wires the handlers and TLS configuration. hub may be nil and set later.
+func New(cfg *config.Config, hub *stream.Hub, log *slog.Logger, opts ...Options) (*Server, error) {
+	var o Options
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	if o.Auth == nil {
+		o.Auth = auth.NewAuthenticator(nil, cfg.Auth.RequireTOTP)
+		o.Auth.SetUsers(UsersFromConfig(cfg), cfg.Auth.RequireTOTP)
+	}
+	if o.Sessions == nil {
+		o.Sessions = auth.NewSessionStore(cfg.Auth.SessionIdleTimeout.Duration, cfg.Auth.SessionMaxAge.Duration)
+	}
+	if o.Limiter == nil {
+		o.Limiter = auth.NewLimiter(cfg.Auth.LoginRateLimit, cfg.Auth.LoginRateWindow.Duration)
 	}
 	s := &Server{
 		cfg:      cfg,
 		log:      log,
-		auth:     auth.NewAuthenticator(users, cfg.Auth.RequireTOTP),
-		sessions: auth.NewSessionStore(cfg.Auth.SessionIdleTimeout.Duration, cfg.Auth.SessionMaxAge.Duration),
-		limiter:  auth.NewLimiter(cfg.Auth.LoginRateLimit, cfg.Auth.LoginRateWindow.Duration),
-		hub:      hub,
+		auth:     o.Auth,
+		sessions: o.Sessions,
+		limiter:  o.Limiter,
+		getCert:  o.GetCertificate,
 		origins:  make(map[string]bool),
 	}
-	for _, o := range cfg.Server.AllowedOrigins {
-		s.origins[strings.ToLower(strings.TrimSuffix(o, "/"))] = true
+	s.hub.Store(hub)
+	for _, origin := range cfg.Server.AllowedOrigins {
+		s.origins[strings.ToLower(strings.TrimSuffix(origin, "/"))] = true
 	}
 	if err := s.setupTLS(); err != nil {
 		return nil, err
@@ -66,8 +89,25 @@ func New(cfg *config.Config, hub *stream.Hub, log *slog.Logger) (*Server, error)
 	return s, nil
 }
 
+// UsersFromConfig converts [[users]] entries.
+func UsersFromConfig(cfg *config.Config) []auth.User {
+	users := make([]auth.User, 0, len(cfg.Users))
+	for _, u := range cfg.Users {
+		users = append(users, auth.User{Name: u.Name, PasswordHash: u.PasswordHash, TOTPSecret: u.TOTPSecret})
+	}
+	return users
+}
+
+// SetHub swaps the streaming hub (nil while the stream stack restarts).
+func (s *Server) SetHub(h *stream.Hub) { s.hub.Store(h) }
+
 func (s *Server) setupTLS() error {
 	s.tlsCfg = baseTLSConfig()
+	if s.getCert != nil {
+		s.tlsCfg.GetCertificate = s.getCert
+		s.tlsCfg.NextProtos = append(s.tlsCfg.NextProtos, "acme-tls/1")
+		return nil
+	}
 	switch {
 	case s.cfg.TLS.ACME:
 		s.acme = &autocert.Manager{
@@ -84,6 +124,8 @@ func (s *Server) setupTLS() error {
 			return err
 		}
 		s.tlsCfg.GetCertificate = r.get
+	case s.cfg.TLS.Auto:
+		return errors.New("tls.auto requires the desktop app (it supplies certificates)")
 	case s.cfg.TLS.SelfSigned:
 		hosts := []string{"localhost", "127.0.0.1", "::1"}
 		if hn, err := os.Hostname(); err == nil {

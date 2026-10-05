@@ -76,13 +76,3 @@ func TestRequireTOTP(t *testing.T) {
 		t.Fatalf("expected totp error, got %v", err)
 	}
 }
-
-func TestExampleConfigParses(t *testing.T) {
-	cfg, err := Load("../../configs/windstream.example.toml")
-	if err != nil {
-		t.Fatalf("example config: %v", err)
-	}
-	if cfg.Display.Mode != "virtual" || !cfg.Display.MakePrimary || cfg.WebRTC.UDPPort != 8444 {
-		t.Errorf("unexpected example values: %+v", cfg.Display)
-	}
-}

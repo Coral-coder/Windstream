@@ -51,3 +51,25 @@ func TestToXUSB(t *testing.T) {
 		t.Errorf("triggers = %d %d", r.LeftTrigger, r.RightTrigger)
 	}
 }
+
+func TestViGEmProtocol(t *testing.T) {
+	// Values computed from CTL_CODE(FILE_DEVICE_BUS_EXTENDER, 0x801+n, METHOD_BUFFERED, FILE_WRITE_DATA).
+	for name, got := range map[string][2]uint32{
+		"plugin":  {ioctlPluginTarget, 0x2AA004},
+		"unplug":  {ioctlUnplugTarget, 0x2AA008},
+		"version": {ioctlCheckVersion, 0x2AA00C},
+		"ready":   {ioctlWaitDeviceReady, 0x2AA010},
+		"xusb":    {ioctlXUSBSubmit, 0x2AA808},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("%s ioctl = %#x want %#x", name, got[0], got[1])
+		}
+	}
+	if m := pluginMsg(3); len(m) != 16 || m[0] != 16 || m[4] != 3 || m[12] != 0x5E || m[13] != 0x04 {
+		t.Errorf("plugin msg = %x", m)
+	}
+	m := xusbSubmitMsg(2, xusbReport{Buttons: xusbA, LeftTrigger: 9, ThumbLX: -2})
+	if len(m) != 20 || m[0] != 20 || m[4] != 2 || m[8] != 0x00 || m[9] != 0x10 || m[10] != 9 || m[12] != 0xFE || m[13] != 0xFF {
+		t.Errorf("xusb msg = %x", m)
+	}
+}

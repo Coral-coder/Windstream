@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windstream</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img src="/favicon.svg" alt=""> Windstream</div>
+  <div class="top-right"><span id="who" class="muted"></span><button id="btn-logout" class="ghost hidden">Sign out</button></div>
+</header>
+
+<!-- First run -->
+<main id="view-setup" class="narrow hidden">
+  <section class="card" id="setup-1">
+    <h1>Welcome to Windstream</h1>
+    <p class="muted">Create the account you'll use to sign in from your phone, laptop or TV. While you do this, Windstream is setting up this PC in the background.</p>
+    <form id="form-setup-1" class="stack">
+      <label>Username <input name="username" autocomplete="username" required maxlength="32" pattern="[A-Za-z0-9._\-]+"></label>
+      <label>Password <input name="password" type="password" autocomplete="new-password" required minlength="12"></label>
+      <label>Confirm password <input name="confirm" type="password" autocomplete="new-password" required minlength="12"></label>
+      <p class="hint">At least 12 characters. This PC will be reachable from the internet, so use a password you don't use anywhere else.</p>
+      <button type="submit">Continue</button>
+      <p class="error" data-error></p>
+    </form>
+  </section>
+  <section class="card hidden" id="setup-2">
+    <h1>Turn on two-step sign-in</h1>
+    <p class="muted">Scan this with an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password, Authy…). You'll enter a code from it each time you sign in.</p>
+    <div class="qr-row"><img id="setup-qr" alt="Authenticator QR code" width="200" height="200">
+      <div><p class="muted small">Can't scan? Enter this key:</p><code id="setup-secret" class="secret"></code></div></div>
+    <form id="form-setup-2" class="stack">
+      <label>6-digit code from the app <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></label>
+      <button type="submit">Finish setup</button>
+      <p class="error" data-error></p>
+    </form>
+  </section>
+</main>
+
+<main id="view-login" class="narrow hidden">
+  <section class="card">
+    <h1>Sign in</h1>
+    <form id="form-login" class="stack">
+      <label>Username <input name="username" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <label>Authenticator code <input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+      <button type="submit">Sign in</button>
+      <p class="error" data-error></p>
+    </form>
+  </section>
+</main>
+
+<main id="view-dash" class="wide hidden">
+  <section class="card hero">
+    <div class="hero-text">
+      <h1>Play from anywhere</h1>
+      <p class="muted" id="link-caption">Open this link on any device and sign in.</p>
+      <div class="link-row"><a id="link" target="_blank" rel="noopener"></a><button id="btn-copy" class="ghost">Copy</button></div>
+      <p class="muted small" id="lan-line"></p>
+      <div id="net-warn" class="notice hidden"></div>
+    </div>
+    <img id="link-qr" class="hero-qr hidden" alt="QR code of your link" width="168" height="168">
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>This PC</h2>
+      <ul id="deps" class="checklist"></ul>
+      <div class="kv"><span>Streaming engine</span><b id="engine"></b></div>
+      <div class="kv"><span>Connected now</span><b id="clients"></b></div>
+      <div class="kv"><span>Encoder</span><b id="encoder"></b></div>
+    </section>
+    <section class="card">
+      <h2>Internet access</h2>
+      <div class="kv"><span>Router</span><b id="upnp"></b></div>
+      <div class="kv"><span>Public IP</span><b id="pubip"></b></div>
+      <div class="kv"><span>Address</span><b id="hostname"></b></div>
+      <div id="forward" class="hidden"><p class="small muted" id="forward-why"></p><ul id="forward-list" class="small"></ul></div>
+      <button id="btn-net" class="ghost small-btn">Re-check</button>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Settings</h2>
+    <form id="form-settings" class="settings">
+      <label>Resolution
+        <select name="resolution">
+          <option>1280x720</option><option>1600x900</option><option>1920x1080</option>
+          <option>2560x1440</option><option>3440x1440</option><option>3840x2160</option>
+        </select></label>
+      <label>Frame rate
+        <select name="fps"><option value="30">30 fps</option><option value="60">60 fps</option><option value="90">90 fps</option><option value="120">120 fps</option></select></label>
+      <label>Quality (bitrate) <span class="range"><input name="bitrate_mbps" type="range" min="5" max="80" step="1"><output id="bitrate-out"></output></span></label>
+      <label>Encoder
+        <select name="encoder"><option value="auto">Automatic (GPU)</option><option value="nvenc">NVIDIA NVENC</option><option value="amf">AMD AMF</option><option value="qsv">Intel Quick Sync</option><option value="x264">Software (CPU)</option></select></label>
+      <label>Screen
+        <select name="display_mode"><option value="virtual">Virtual screen (no monitor needed)</option><option value="monitor">A real monitor</option></select></label>
+      <label id="monitor-row">Monitor <select name="monitor"></select></label>
+      <label class="check"><input type="checkbox" name="make_primary"> Make the streamed screen the main display</label>
+      <label class="check"><input type="checkbox" name="audio"> Stream sound</label>
+      <label class="check"><input type="checkbox" name="gamepads"> Controllers</label>
+      <label class="check"><input type="checkbox" name="keyboard_mouse"> Keyboard &amp; mouse</label>
+      <label class="check" id="steam-row"><input type="checkbox" name="launch_steam"> Open Steam Big Picture automatically</label>
+      <details class="adv"><summary>Advanced</summary>
+        <label class="check"><input type="checkbox" name="upnp"> Open router ports automatically (UPnP)</label>
+        <label>Own domain (optional) <input name="custom_domain" placeholder="games.example.com"></label>
+        <label>People streaming at once <input name="max_clients" type="number" min="1" max="8"></label>
+      </details>
+      <div class="actions"><button type="submit">Save</button><span class="saved hidden" id="saved">Saved ✓</span><p class="error" data-error></p></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Accounts</h2>
+    <ul id="users" class="users"></ul>
+    <details id="add-user"><summary>Add an account</summary>
+      <form id="form-add-1" class="stack">
+        <label>Username <input name="username" required maxlength="32"></label>
+        <label>Password <input name="password" type="password" autocomplete="new-password" required minlength="12"></label>
+        <button type="submit">Continue</button><p class="error" data-error></p>
+      </form>
+      <form id="form-add-2" class="stack hidden">
+        <p class="muted">Scan with the new person's authenticator app, then enter a code.</p>
+        <div class="qr-row"><img id="add-qr" alt="QR" width="180" height="180"><code id="add-secret" class="secret"></code></div>
+        <label>Code <input name="code" inputmode="numeric" maxlength="6" required></label>
+        <button type="submit">Add account</button><p class="error" data-error></p>
+      </form>
+    </details>
+  </section>
+
+  <section class="card">
+    <details><summary>Activity log</summary><pre id="logs" class="logs"></pre></details>
+  </section>
+
+  <section class="card danger">
+    <h2>Remove Windstream</h2>
+    <p class="muted small">Closes router ports, removes the virtual screen, startup entry and firewall rules, then deletes the app.</p>
+    <label class="check"><input type="checkbox" id="rm-data"> Also delete accounts and settings</label>
+    <button id="btn-uninstall" class="danger-btn">Uninstall</button>
+  </section>
+  <p class="footer muted small" id="version"></p>
+</main>
+<script src="/admin.js"></script>
+</body>
+</html>

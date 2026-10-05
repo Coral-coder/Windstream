@@ -29,7 +29,12 @@ type Config struct {
 	Video wsmedia.VideoConfig
 	// Source resolves the capture target before each pipeline start (DXGI
 	// indices can change when monitors are added or rearranged).
-	Source       func() (wsmedia.Source, error)
+	Source func() (wsmedia.Source, error)
+	// Acquire/Release bracket each capture session (first viewer joins ..
+	// last viewer leaves), e.g. to switch the virtual screen on only while
+	// someone is streaming. Optional.
+	Acquire      func(ctx context.Context) error
+	Release      func()
 	Audio        wsmedia.AudioConfig
 	AudioEnabled bool
 	WebRTC       config.WebRTC
@@ -43,6 +48,7 @@ type Config struct {
 
 // Stats is a point-in-time snapshot for the UI / logs.
 type Stats struct {
+	Error     string `json:"error,omitempty"`
 	Clients   int    `json:"clients"`
 	Encoder   string `json:"encoder"`
 	Running   bool   `json:"running"`
@@ -68,6 +74,7 @@ type Hub struct {
 	clients    map[*Client]struct{}
 	encoder    string
 	candidates []string
+	lastErr    string
 	pipeCancel context.CancelFunc
 	pipeWG     sync.WaitGroup
 	stopTimer  *time.Timer
@@ -104,7 +111,10 @@ func NewHub(ctx context.Context, cfg Config, log *slog.Logger) (*Hub, error) {
 	}
 	se.SetNetworkTypes(networks)
 	if len(cfg.WebRTC.PublicIPs) > 0 {
-		se.SetNAT1To1IPs(cfg.WebRTC.PublicIPs, webrtc.ICECandidateTypeHost)
+		// Advertise the public IP as a server-reflexive candidate alongside
+		// the LAN host candidates, so both remote and local clients connect
+		// directly.
+		se.SetNAT1To1IPs(cfg.WebRTC.PublicIPs, webrtc.ICECandidateTypeSrflx)
 	}
 	if cfg.WebRTC.IncludeLoopbackCandidate() {
 		se.SetIncludeLoopbackCandidate(true)
@@ -185,6 +195,7 @@ func (h *Hub) Stats() Stats {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return Stats{
+		Error:   h.lastErr,
 		Clients: len(h.clients), Encoder: h.encoder, Running: h.pipeCancel != nil,
 		Frames: h.frames.Load(), Keyframes: h.keyframes.Load(), Bytes: h.bytes.Load(),
 	}
@@ -255,6 +266,25 @@ func (h *Hub) stopPipelinesLocked() {
 func (h *Hub) runVideo(ctx context.Context) {
 	defer h.pipeWG.Done()
 	backoff := time.Second
+	if h.cfg.Acquire != nil {
+		for {
+			err := h.cfg.Acquire(ctx)
+			if err == nil {
+				break
+			}
+			h.mu.Lock()
+			h.lastErr = err.Error()
+			h.mu.Unlock()
+			h.log.Error("display unavailable", "error", err)
+			if !h.sleep(ctx, &backoff) {
+				return
+			}
+		}
+		if h.cfg.Release != nil {
+			defer h.cfg.Release()
+		}
+		backoff = time.Second
+	}
 	h.mu.Lock()
 	candidates := h.candidates // probed once, reused across viewer sessions
 	h.mu.Unlock()
@@ -289,6 +319,7 @@ func (h *Hub) runVideo(ctx context.Context) {
 		}
 		h.mu.Lock()
 		h.encoder = enc
+		h.lastErr = ""
 		h.mu.Unlock()
 		h.log.Info("starting video pipeline", "encoder", enc, "test_source", src.Test,
 			"adapter", src.Adapter, "output", src.Output, "fps", h.cfg.Video.FPS,

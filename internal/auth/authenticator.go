@@ -26,6 +26,7 @@ const (
 
 // Authenticator verifies passwords and second factors.
 type Authenticator struct {
+	umu         sync.RWMutex
 	users       map[string]User
 	requireTOTP bool
 	mu          sync.Mutex
@@ -42,9 +43,30 @@ func NewAuthenticator(users []User, requireTOTP bool) *Authenticator {
 	return &Authenticator{users: m, requireTOTP: requireTOTP, lastCounter: make(map[string]int64), now: time.Now}
 }
 
+// SetUsers replaces the account list (live, without dropping sessions).
+func (a *Authenticator) SetUsers(users []User, requireTOTP bool) {
+	m := make(map[string]User, len(users))
+	for _, u := range users {
+		m[u.Name] = u
+	}
+	a.umu.Lock()
+	a.users, a.requireTOTP = m, requireTOTP
+	a.umu.Unlock()
+}
+
+// Count returns the number of accounts.
+func (a *Authenticator) Count() int {
+	a.umu.RLock()
+	defer a.umu.RUnlock()
+	return len(a.users)
+}
+
 // Authenticate checks username/password and, when configured, a TOTP code.
 func (a *Authenticator) Authenticate(username, password, code string) Result {
+	a.umu.RLock()
 	u, ok := a.users[username]
+	requireTOTP := a.requireTOTP
+	a.umu.RUnlock()
 	if !ok {
 		BurnVerify(password)
 		return Denied
@@ -54,7 +76,7 @@ func (a *Authenticator) Authenticate(username, password, code string) Result {
 		return Denied
 	}
 	if u.TOTPSecret == "" {
-		if a.requireTOTP {
+		if requireTOTP {
 			return Denied
 		}
 		return OK
@@ -77,6 +99,8 @@ func (a *Authenticator) Authenticate(username, password, code string) Result {
 
 // HasUser reports whether username is configured.
 func (a *Authenticator) HasUser(username string) bool {
+	a.umu.RLock()
+	defer a.umu.RUnlock()
 	_, ok := a.users[username]
 	return ok
 }

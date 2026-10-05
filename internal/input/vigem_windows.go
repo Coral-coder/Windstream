@@ -5,120 +5,98 @@ package input
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-// ViGEmClient.dll API (https://github.com/nefarius/ViGEmClient).
-const vigemErrorNone = 0x20000000
+var guidViGEmBus = windows.GUID{Data1: 0x96E42B22, Data2: 0xF5E9, Data3: 0x42F8, Data4: [8]byte{0xB0, 0x43, 0xED, 0x0F, 0x93, 0x2F, 0x01, 0x4F}}
 
-type vigemAPI struct {
-	alloc, free, connect, disconnect          *windows.Proc
-	targetX360Alloc, targetFree               *windows.Proc
-	targetAdd, targetRemove, targetX360Update *windows.Proc
+// ErrNoViGEmBus means the ViGEmBus driver is not installed.
+var ErrNoViGEmBus = errors.New("ViGEmBus driver not installed")
+
+// ViGEmBusPresent reports whether the bus driver is installed and running.
+func ViGEmBusPresent() bool {
+	paths, err := windows.CM_Get_Device_Interface_List("", &guidViGEmBus, windows.CM_GET_DEVICE_INTERFACE_LIST_PRESENT)
+	return err == nil && len(paths) > 0
 }
 
-var (
-	vigemOnce sync.Once
-	vigemLib  *vigemAPI
-	vigemErr  error
-)
-
-func loadViGEm(path string) (*vigemAPI, error) {
-	vigemOnce.Do(func() {
-		if path == "" {
-			exe, err := os.Executable()
-			if err != nil {
-				vigemErr = err
-				return
-			}
-			path = filepath.Join(filepath.Dir(exe), "ViGEmClient.dll")
-		}
-		dll, err := windows.LoadDLL(path)
-		if err != nil {
-			vigemErr = fmt.Errorf("load %s: %w (install the ViGEmBus driver and place ViGEmClient.dll next to windstream.exe)", path, err)
-			return
-		}
-		api := &vigemAPI{}
-		procs := map[string]**windows.Proc{
-			"vigem_alloc": &api.alloc, "vigem_free": &api.free,
-			"vigem_connect": &api.connect, "vigem_disconnect": &api.disconnect,
-			"vigem_target_x360_alloc": &api.targetX360Alloc, "vigem_target_free": &api.targetFree,
-			"vigem_target_add": &api.targetAdd, "vigem_target_remove": &api.targetRemove,
-			"vigem_target_x360_update": &api.targetX360Update,
-		}
-		for name, dst := range procs {
-			p, err := dll.FindProc(name)
-			if err != nil {
-				vigemErr = fmt.Errorf("%s: %w", path, err)
-				return
-			}
-			*dst = p
-		}
-		vigemLib = api
-	})
-	return vigemLib, vigemErr
-}
-
-// vigemClient is one connection to the ViGEmBus driver.
+// vigemClient is an open handle to the ViGEmBus driver.
 type vigemClient struct {
-	api    *vigemAPI
-	client uintptr
+	h    windows.Handle
+	mu   sync.Mutex
+	used [vigemTargetsMax + 1]bool
 }
 
-func newViGEmClient(dllPath string) (*vigemClient, error) {
-	api, err := loadViGEm(dllPath)
-	if err != nil {
-		return nil, err
+func newViGEmClient() (*vigemClient, error) {
+	paths, err := windows.CM_Get_Device_Interface_List("", &guidViGEmBus, windows.CM_GET_DEVICE_INTERFACE_LIST_PRESENT)
+	if err != nil || len(paths) == 0 {
+		return nil, ErrNoViGEmBus
 	}
-	c, _, _ := api.alloc.Call()
-	if c == 0 {
-		return nil, errors.New("vigem_alloc failed")
+	var lastErr error
+	for _, p := range paths {
+		name, err := windows.UTF16PtrFromString(p)
+		if err != nil {
+			continue
+		}
+		h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING,
+			windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		c := &vigemClient{h: h}
+		if err := c.ioctl(ioctlCheckVersion, checkVersionMsg()); err != nil {
+			windows.CloseHandle(h)
+			lastErr = fmt.Errorf("ViGEmBus version check: %w", err)
+			continue
+		}
+		return c, nil
 	}
-	if rc, _, _ := api.connect.Call(c); rc != vigemErrorNone {
-		api.free.Call(c)
-		return nil, fmt.Errorf("vigem_connect: error %#x (is the ViGEmBus driver installed?)", rc)
-	}
-	return &vigemClient{api: api, client: c}, nil
+	return nil, fmt.Errorf("open ViGEmBus: %w", lastErr)
 }
 
-func (v *vigemClient) close() {
-	v.api.disconnect.Call(v.client)
-	v.api.free.Call(v.client)
+func (c *vigemClient) ioctl(code uint32, in []byte) error {
+	var n uint32
+	return windows.DeviceIoControl(c.h, code, &in[0], uint32(len(in)), nil, 0, &n, nil)
 }
+
+func (c *vigemClient) close() { windows.CloseHandle(c.h) }
 
 type x360Pad struct {
-	v      *vigemClient
-	target uintptr
+	c      *vigemClient
+	serial uint32
 }
 
-func (v *vigemClient) addX360() (*x360Pad, error) {
-	t, _, _ := v.api.targetX360Alloc.Call()
-	if t == 0 {
-		return nil, errors.New("vigem_target_x360_alloc failed")
+// addX360 plugs in a virtual Xbox 360 controller on the first free serial.
+func (c *vigemClient) addX360() (*x360Pad, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var lastErr error
+	for s := uint32(1); s <= vigemTargetsMax; s++ {
+		if c.used[s] {
+			continue
+		}
+		if err := c.ioctl(ioctlPluginTarget, pluginMsg(s)); err != nil {
+			lastErr = err // serial taken by another ViGEm client; try the next
+			continue
+		}
+		// Blocks until the child device can accept reports (bus v1.17+).
+		_ = c.ioctl(ioctlWaitDeviceReady, serialMsg(s))
+		c.used[s] = true
+		return &x360Pad{c: c, serial: s}, nil
 	}
-	if rc, _, _ := v.api.targetAdd.Call(v.client, t); rc != vigemErrorNone {
-		v.api.targetFree.Call(t)
-		return nil, fmt.Errorf("vigem_target_add: error %#x", rc)
-	}
-	return &x360Pad{v: v, target: t}, nil
+	return nil, fmt.Errorf("no free ViGEm slot: %v", lastErr)
 }
 
 func (p *x360Pad) update(r xusbReport) error {
-	// XUSB_REPORT is 12 bytes, so the Windows x64 ABI passes it by reference
-	// to a caller-owned copy.
-	rc, _, _ := p.v.api.targetX360Update.Call(p.v.client, p.target, uintptr(unsafe.Pointer(&r)))
-	if rc != vigemErrorNone {
-		return fmt.Errorf("vigem_target_x360_update: error %#x", rc)
-	}
-	return nil
+	return p.c.ioctl(ioctlXUSBSubmit, xusbSubmitMsg(p.serial, r))
 }
 
 func (p *x360Pad) remove() {
-	p.v.api.targetRemove.Call(p.v.client, p.target)
-	p.v.api.targetFree.Call(p.target)
+	_ = p.c.ioctl(ioctlUnplugTarget, serialMsg(p.serial))
+	p.c.mu.Lock()
+	p.c.used[p.serial] = false
+	p.c.mu.Unlock()
 }

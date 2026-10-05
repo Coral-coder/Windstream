@@ -17,3 +17,5 @@
 *.exe
 ViGEmClient.dll
 /logs/
+/dev-data/
+/windstream-data/
