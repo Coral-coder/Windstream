@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 
 	"github.com/coral-coder/windstream/internal/control"
 )
@@ -17,6 +19,7 @@ type appOptions struct {
 	Stderr    bool // also log to stderr
 	Platform  control.Platform
 	OnReady   func(c *control.Controller)
+	OnCrash   func(msg, logPath string) // shown to the user on a fatal crash
 }
 
 // runApp starts the controller with logging to <data>/logs/windstream.log
@@ -52,5 +55,17 @@ func runApp(ctx context.Context, o appOptions) error {
 	if o.OnReady != nil {
 		o.OnReady(c)
 	}
+	// A panic escaping Run is written to the log (and, on Windows, shown)
+	// before the process exits, so a crash is never silent.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("windstream crashed", "panic", r, "stack", string(debug.Stack()))
+			_ = f.Sync()
+			if o.OnCrash != nil {
+				o.OnCrash(fmt.Sprintf("%v", r), logPath)
+			}
+			os.Exit(1)
+		}
+	}()
 	return c.Run(ctx)
 }

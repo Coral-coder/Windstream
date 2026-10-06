@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/coral-coder/windstream/internal/control"
+	"github.com/coral-coder/windstream/internal/deps"
 	"github.com/coral-coder/windstream/internal/winapp"
 )
 
@@ -24,8 +26,26 @@ func platformMain(args []string) bool {
 		err = winapp.Resident(func(ctx context.Context, p control.Platform, onReady func(*control.Controller)) error {
 			// Empty PanelAddr: the controller uses the saved dashboard port,
 			// moving to a free one if another program holds it.
-			return runApp(ctx, appOptions{DataDir: winapp.DataDir, Platform: p, OnReady: onReady})
+			return runApp(ctx, appOptions{DataDir: winapp.DataDir, Platform: p, OnReady: onReady, OnCrash: winapp.ShowCrash})
 		})
+	case args[0] == "--vdd-install":
+		// Internal: install the virtual display device in a child process so
+		// a native driver-subsystem crash cannot take down the main app. Its
+		// stdout/stderr are piped back to the parent, so no console is attached.
+		if len(args) < 2 {
+			os.Exit(2)
+		}
+		reboot, verr := deps.InstallVDDDevice(args[1])
+		if verr != nil {
+			fmt.Fprintln(os.Stderr, verr.Error())
+			os.Exit(1)
+		}
+		if reboot {
+			fmt.Println("installed (restart recommended)")
+		} else {
+			fmt.Println("installed")
+		}
+		os.Exit(0)
 	case args[0] == "--uninstall":
 		err = winapp.Uninstall(args[1:])
 	default:

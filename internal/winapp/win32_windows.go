@@ -167,3 +167,8 @@ func createShortcut(lnk, target, args, desc string) error {
 		return err
 	})
 }
+
+// ShowCrash tells the user about a fatal crash and points at the log.
+func ShowCrash(msg, logPath string) {
+	messageBox("Windstream stopped unexpectedly:\n\n"+msg+"\n\nThe full details are in:\n"+logPath, mbOK|mbIconError)
+}

@@ -94,6 +94,7 @@ func (m *Manager) ensureVDD(ctx context.Context) error {
 	}
 	if set, _, ok := findVDDDevice(); ok {
 		set.Close()
+		_ = os.WriteFile(filepath.Join(m.dataDir, "vdd.installed"), []byte(VirtualDisplayDriver.Name), 0o644)
 		return nil
 	}
 	zipPath := filepath.Join(m.dataDir, "downloads", filepath.Base(VirtualDisplayDriver.URL))
@@ -106,26 +107,60 @@ func (m *Manager) ensureVDD(ctx context.Context) error {
 	if _, err := ExtractMatching(zipPath, "VirtualDisplayDriver/", dir); err != nil {
 		return err
 	}
-	inf := filepath.Join(dir, "MttVDD.inf")
 
-	// Equivalent of `devcon install MttVDD.inf Root\MttVDD`: create the root
-	// device node, then bind the driver to it.
+	// The SetupAPI device creation + driver bind can, on some systems, crash
+	// hard inside the OS driver subsystem (a native access violation Go
+	// cannot recover from). Run it in a short-lived child process so such a
+	// crash only loses the child, never the running app and its dashboard.
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	out, err := exec.CommandContext(ctx, self, "--vdd-install", dir).CombinedOutput()
+	msg := strings.TrimSpace(string(out))
+	if err != nil {
+		if len(msg) == 0 {
+			msg = err.Error()
+		}
+		return fmt.Errorf("install display driver: %s", firstLine(msg))
+	}
+	m.log.Info("installed", "artifact", VirtualDisplayDriver.Name, "detail", msg)
+	_ = os.WriteFile(filepath.Join(m.dataDir, "vdd.installed"), []byte(VirtualDisplayDriver.Name), 0o644)
+	return nil
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// InstallVDDDevice creates the root-enumerated display device and binds the
+// driver in infDir to it. It is the body of the `--vdd-install` subcommand,
+// run in its own process so a native driver-subsystem crash is contained.
+// It is the devcon equivalent of: devcon install MttVDD.inf Root\MttVDD.
+func InstallVDDDevice(infDir string) (rebootRequired bool, err error) {
+	inf := filepath.Join(infDir, "MttVDD.inf")
+	if _, err := os.Stat(inf); err != nil {
+		return false, fmt.Errorf("driver files missing: %w", err)
+	}
 	set, err := windows.SetupDiCreateDeviceInfoListEx(&guidDevClassDisplay, 0, "")
 	if err != nil {
-		return fmt.Errorf("SetupDiCreateDeviceInfoList: %w", err)
+		return false, fmt.Errorf("SetupDiCreateDeviceInfoList: %w", err)
 	}
 	defer set.Close()
 	data, err := set.CreateDeviceInfo("Display", &guidDevClassDisplay, "", 0, windows.DICD_GENERATE_ID)
 	if err != nil {
-		return fmt.Errorf("SetupDiCreateDeviceInfo: %w", err)
+		return false, fmt.Errorf("SetupDiCreateDeviceInfo: %w", err)
 	}
 	hwid := windows.StringToUTF16(VDDHardwareID + "\x00") // REG_MULTI_SZ: double NUL
 	hwidBytes := unsafe.Slice((*byte)(unsafe.Pointer(&hwid[0])), len(hwid)*2)
 	if err := set.SetDeviceRegistryProperty(data, windows.SPDRP_HARDWAREID, hwidBytes); err != nil {
-		return fmt.Errorf("set hardware ID: %w", err)
+		return false, fmt.Errorf("set hardware ID: %w", err)
 	}
 	if err := set.CallClassInstaller(windows.DIF_REGISTERDEVICE, data); err != nil {
-		return fmt.Errorf("register device: %w", err)
+		return false, fmt.Errorf("register device: %w", err)
 	}
 	hw, _ := windows.UTF16PtrFromString(VDDHardwareID)
 	infW, _ := windows.UTF16PtrFromString(inf)
@@ -134,11 +169,9 @@ func (m *Manager) ensureVDD(ctx context.Context) error {
 		installflagForce, uintptr(unsafe.Pointer(&reboot)))
 	if r == 0 {
 		_ = set.CallClassInstaller(windows.DIF_REMOVE, data)
-		return fmt.Errorf("install display driver: %v", callErr)
+		return false, fmt.Errorf("UpdateDriverForPlugAndPlayDevices: %v", callErr)
 	}
-	m.log.Info("installed", "artifact", VirtualDisplayDriver.Name, "reboot_required", reboot != 0)
-	_ = os.WriteFile(filepath.Join(m.dataDir, "vdd.installed"), []byte(VirtualDisplayDriver.Name), 0o644)
-	return nil
+	return reboot != 0, nil
 }
 
 // UninstallVDD removes the virtual display device node.

@@ -110,9 +110,14 @@ func (m *Manager) EnsureAll(ctx context.Context) {
 }
 
 func (m *Manager) run(ctx context.Context, id string, fn func(context.Context) error) {
-	if err := fn(ctx); err != nil {
+	err := guard(func() error { return fn(ctx) })
+	if err != nil {
 		m.log.Error("dependency install failed", "component", id, "error", err)
-		m.set(id, StateError, 0, err.Error())
+		detail := err.Error()
+		if i := len(detail); i > 200 { // keep the dashboard message short
+			detail = detail[:200]
+		}
+		m.set(id, StateError, 0, detail)
 		return
 	}
 	m.set(id, StateReady, 1, "")

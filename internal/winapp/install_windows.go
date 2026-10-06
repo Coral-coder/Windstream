@@ -124,8 +124,25 @@ func secureDataDir(userSID string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(DataDir, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	if err := windows.SetNamedSecurityInfo(DataDir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		return err
+	}
+	// Logs contain no secrets (passwords are hashed; no TOTP secrets or keys),
+	// so let any user on this PC read them for troubleshooting. Inherit from
+	// the parent but add read access for the Users group.
+	logs := filepath.Join(DataDir, "logs")
+	if err := os.MkdirAll(logs, 0o755); err != nil {
+		return err
+	}
+	logSDDL := "D:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" // BU = Builtin Users: read & execute
+	if lsd, err := windows.SecurityDescriptorFromString(logSDDL); err == nil {
+		if ldacl, _, err := lsd.DACL(); err == nil {
+			_ = windows.SetNamedSecurityInfo(logs, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, ldacl, nil)
+		}
+	}
+	return nil
 }
 
 func xmlEscape(s string) string {

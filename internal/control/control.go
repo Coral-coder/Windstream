@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -279,15 +280,13 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.restartHTTPS()
 	c.restartNetwork()
 
-	go func() {
-		if c.opts.Dev {
-			c.deps.EnsureAll(ctx) // only probes for a system ffmpeg
-		} else {
+	safego(c.log, "dependency setup", func() {
+		if !c.opts.Dev {
 			c.writeVDDMode()
-			c.deps.EnsureAll(ctx)
 		}
+		c.deps.EnsureAll(ctx)
 		c.requestRestart()
-	}()
+	})
 
 	c.log.Info("windstream running", "dashboard", c.PanelURL(), "https_port", c.Config().ListenPort(),
 		"media_udp_port", c.Config().WebRTC.UDPPort, "version", c.opts.Version)
@@ -313,7 +312,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			case <-c.restartReq:
 			default:
 			}
-			c.restartStack(ctx)
+			c.safeRestartStack(ctx)
 		}
 	}
 }
@@ -334,7 +333,7 @@ func (c *Controller) restartNetwork() {
 		c.tls.Warm(ctx)
 		c.requestRestart()
 	})
-	go c.net.Run(ctx)
+	safego(c.log, "network", func() { c.net.Run(ctx) })
 }
 
 func (c *Controller) netStatus() netx.Status {
@@ -460,6 +459,20 @@ func (c *Controller) restartStack(ctx context.Context) {
 	c.disp, c.hub, c.stackErr, c.stackMode = disp, hub, "", mode
 	c.srv.SetHub(hub)
 	c.log.Info("streaming engine ready", "display", mode)
+}
+
+// safeRestartStack restarts the engine, turning a panic into a dashboard
+// error instead of a crash.
+func (c *Controller) safeRestartStack(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.log.Error("engine restart crashed (recovered)", "panic", r, "stack", string(debug.Stack()))
+			c.stackMu.Lock()
+			c.stackErr = fmt.Sprintf("internal error starting the stream engine: %v", r)
+			c.stackMu.Unlock()
+		}
+	}()
+	c.restartStack(ctx)
 }
 
 // HubConfig builds the streaming engine configuration.
