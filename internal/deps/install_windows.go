@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -39,9 +38,7 @@ func (m *Manager) ensureViGEm(ctx context.Context) error {
 	}
 	m.set("vigem", StateInstalling, 1, "installing driver")
 	// Advanced Installer bootstrapper: no UI, silent MSI, no reboot.
-	cmd := exec.CommandContext(ctx, exe, "/exenoui", "/qn", "/norestart")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	err := cmd.Run()
+	err := exec.CommandContext(ctx, exe, "/exenoui", "/qn", "/norestart").Run()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 3010 {
 		err = nil // installed; reboot recommended

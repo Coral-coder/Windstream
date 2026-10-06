@@ -4,7 +4,6 @@ package winapp
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -13,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -74,8 +72,8 @@ func Install(version, userSID string) error {
 	if err := writeUninstallEntry(version); err != nil {
 		return fmt.Errorf("uninstall entry: %w", err)
 	}
-	if out, err := hidden(system32("schtasks.exe"), "/Run", "/TN", taskName).CombinedOutput(); err != nil {
-		return fmt.Errorf("start: %v %s", err, out)
+	if err := runTask(); err != nil {
+		return fmt.Errorf("start: %w", err)
 	}
 	return nil
 }
@@ -130,23 +128,6 @@ func secureDataDir(userSID string) error {
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
-func addFirewallRule() error {
-	netsh := system32("netsh.exe")
-	_ = hiddenCmdLine(netsh, `netsh advfirewall firewall delete rule name="`+firewallRule+`"`).Run()
-	// One program-scoped rule: covers the HTTPS port and the WebRTC UDP port
-	// for windstream.exe only, on every network profile.
-	cmd := hiddenCmdLine(netsh, fmt.Sprintf(`netsh advfirewall firewall add rule name="%s" dir=in action=allow program="%s" enable=yes profile=any description="Windstream game streaming"`,
-		firewallRule, InstalledExe))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%v: %s", err, bytes.TrimSpace(out))
-	}
-	return nil
-}
-
-func removeFirewallRule() {
-	_ = hiddenCmdLine(system32("netsh.exe"), `netsh advfirewall firewall delete rule name="`+firewallRule+`"`).Run()
-}
-
 func xmlEscape(s string) string {
 	var b bytes.Buffer
 	_ = xml.EscapeText(&b, []byte(s))
@@ -156,9 +137,8 @@ func xmlEscape(s string) string {
 // taskXML: start at the user's logon, in their desktop session, elevated
 // without a prompt, never time out, restart after a crash.
 func taskXML(userSID string) string {
-	return `<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Windstream game streaming server</Description></RegistrationInfo>
+	return `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Author>Windstream</Author><Description>Starts Windstream game streaming (tray app) when you sign in. Remove it via Apps &amp; features &gt; Windstream.</Description></RegistrationInfo>
   <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>` + userSID + `</UserId></LogonTrigger></Triggers>
   <Principals><Principal id="Author"><UserId>` + userSID + `</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings>
@@ -196,26 +176,7 @@ func registerTask(userSID string) error {
 			return err
 		}
 	}
-	// schtasks wants UTF-16LE with a BOM.
-	u := utf16.Encode([]rune(taskXML(userSID)))
-	var b bytes.Buffer
-	b.Write([]byte{0xFF, 0xFE})
-	_ = binary.Write(&b, binary.LittleEndian, u)
-	f, err := os.CreateTemp("", "windstream-task-*.xml")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err := f.Write(b.Bytes()); err != nil {
-		f.Close()
-		return err
-	}
-	f.Close()
-	out, err := hidden(system32("schtasks.exe"), "/Create", "/TN", taskName, "/XML", f.Name(), "/F").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, bytes.TrimSpace(out))
-	}
-	return nil
+	return registerTaskXML(taskXML(userSID))
 }
 
 func writeUninstallEntry(version string) error {
@@ -262,10 +223,9 @@ func stopResident(timeout time.Duration) {
 	defer windows.CloseHandle(m)
 	ev, _ := windows.WaitForSingleObject(m, uint32(timeout/time.Millisecond))
 	if ev == uint32(windows.WAIT_TIMEOUT) {
-		// Hung: end the task and kill any leftover resident.
-		_ = hidden(system32("schtasks.exe"), "/End", "/TN", taskName).Run()
-		_ = hidden(system32("taskkill.exe"), "/F", "/IM", "Windstream.exe", "/FI", fmt.Sprintf("PID ne %d", os.Getpid())).Run()
-		time.Sleep(time.Second)
+		// Hung: ask Task Scheduler to end it.
+		stopTask()
+		time.Sleep(2 * time.Second)
 	} else {
 		_ = windows.ReleaseMutex(m)
 	}

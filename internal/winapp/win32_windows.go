@@ -8,11 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"syscall"
 	"unsafe"
 
-	"github.com/go-ole/go-ole"
 	"github.com/go-ole/go-ole/oleutil"
 	"golang.org/x/sys/windows"
 )
@@ -128,19 +126,6 @@ func openURL(url string) {
 	_ = windows.ShellExecute(0, op, u, nil, nil, swShowNormal)
 }
 
-// hidden runs a system tool without flashing a console window.
-func hidden(name string, args ...string) *exec.Cmd {
-	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
-	return cmd
-}
-
-func hiddenCmdLine(exe, cmdline string) *exec.Cmd {
-	cmd := exec.Command(exe)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW, CmdLine: cmdline}
-	return cmd
-}
-
 func system32(name string) string { return filepath.Join(os.Getenv("WINDIR"), "System32", name) }
 
 // AttachParentConsole makes CLI subcommands print to the terminal they were
@@ -161,37 +146,24 @@ func AttachParentConsole() {
 
 // createShortcut writes a .lnk through the WScript.Shell COM object.
 func createShortcut(lnk, target, args, desc string) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	if err := ole.CoInitializeEx(0, ole.COINIT_APARTMENTTHREADED); err != nil {
-		var oe *ole.OleError
-		if !errors.As(err, &oe) || oe.Code() != 1 {
+	return withCOM(func() error {
+		ws, err := newDispatch("WScript.Shell")
+		if err != nil {
 			return err
 		}
-	}
-	defer ole.CoUninitialize()
-	unk, err := oleutil.CreateObject("WScript.Shell")
-	if err != nil {
-		return err
-	}
-	defer unk.Release()
-	ws, err := unk.QueryInterface(ole.IID_IDispatch)
-	if err != nil {
-		return err
-	}
-	defer ws.Release()
-	v, err := oleutil.CallMethod(ws, "CreateShortcut", lnk)
-	if err != nil {
-		return err
-	}
-	sc := v.ToIDispatch()
-	defer sc.Release()
-	for k, val := range map[string]string{"TargetPath": target, "Arguments": args, "Description": desc,
-		"WorkingDirectory": filepath.Dir(target), "IconLocation": target + ",0"} {
-		if _, err := oleutil.PutProperty(sc, k, val); err != nil {
+		defer ws.Release()
+		sc, err := call(ws, "CreateShortcut", lnk)
+		if err != nil {
 			return err
 		}
-	}
-	_, err = oleutil.CallMethod(sc, "Save")
-	return err
+		defer sc.Release()
+		for k, val := range map[string]string{"TargetPath": target, "Arguments": args, "Description": desc,
+			"WorkingDirectory": filepath.Dir(target), "IconLocation": target + ",0"} {
+			if _, err := oleutil.PutProperty(sc, k, val); err != nil {
+				return err
+			}
+		}
+		_, err = call(sc, "Save")
+		return err
+	})
 }

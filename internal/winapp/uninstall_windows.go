@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/coral-coder/windstream/internal/config"
@@ -17,38 +18,8 @@ import (
 	"github.com/coral-coder/windstream/internal/netx"
 )
 
-const createBreakawayFromJob = 0x01000000
-
-// StartUninstall launches the uninstaller as a separate process from a temp
-// copy (so it can delete Program Files\Windstream, including this exe).
-func StartUninstall(removeData bool) error {
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("windstream-uninstall-%d.exe", time.Now().UnixNano()))
-	if err := copyFile(self, tmp); err != nil {
-		return err
-	}
-	args := []string{"--uninstall", "--from-temp"}
-	if removeData {
-		args = append(args, "--remove-data")
-	} else {
-		args = append(args, "--keep-data")
-	}
-	// Task Scheduler runs the app inside a job object; break away so the
-	// uninstaller survives the app quitting.
-	cmd := hidden(tmp, args...)
-	cmd.SysProcAttr.CreationFlags |= createBreakawayFromJob
-	if err := cmd.Start(); err == nil {
-		return nil
-	}
-	cmd = hidden(tmp, args...)
-	return cmd.Start()
-}
-
-// Uninstall implements `--uninstall`. Flags: --remove-data / --keep-data
-// (asks when neither is given), --from-temp (internal).
+// Uninstall implements `--uninstall` (Apps & features). Flags:
+// --remove-data / --keep-data; asks when neither is given.
 func Uninstall(args []string) error {
 	has := func(f string) bool {
 		for _, a := range args {
@@ -58,8 +29,8 @@ func Uninstall(args []string) error {
 		}
 		return false
 	}
-	self, _ := os.Executable()
 	if !isElevated() {
+		self, _ := os.Executable()
 		code, err := runElevated(self, strings.Join(append([]string{"--uninstall"}, args...), " "))
 		if err == ErrCancelled {
 			return nil
@@ -69,20 +40,23 @@ func Uninstall(args []string) error {
 		}
 		return err
 	}
-	if !has("--from-temp") {
-		removeData := has("--remove-data")
-		if !has("--remove-data") && !has("--keep-data") {
-			if messageBox("Uninstall Windstream from this PC?", mbOKCancel|mbIconQuestion) != idOK {
-				return nil
-			}
-			removeData = messageBox("Also delete your Windstream accounts and settings?\n\nChoose No to keep them for a later reinstall.", mbYesNo|mbIconQuestion) == idYes
-		}
-		return StartUninstall(removeData)
-	}
-
 	removeData := has("--remove-data")
+	if !has("--remove-data") && !has("--keep-data") {
+		if messageBox("Uninstall Windstream from this PC?", mbOKCancel|mbIconQuestion) != idOK {
+			return nil
+		}
+		removeData = messageBox("Also delete your Windstream accounts and settings?\n\nChoose No to keep them for a later reinstall.", mbYesNo|mbIconQuestion) == idYes
+	}
 	stopResident(20 * time.Second)
+	performUninstall(removeData)
+	return nil
+}
 
+// performUninstall removes everything Windstream added. It runs inside the
+// installed exe (from Apps & features, or from the dashboard after the app
+// has shut down); files that are still in use, like this exe, are removed
+// by Windows at the next restart.
+func performUninstall(removeData bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	netx.RemoveMappings(ctx, mappedPorts())
 	cancel()
@@ -93,36 +67,62 @@ func Uninstall(args []string) error {
 			_ = os.RemoveAll(deps.VDDConfigDir)
 		}
 	}
-	_ = hidden(system32("schtasks.exe"), "/Delete", "/TN", taskName, "/F").Run()
+	deleteTask()
 	removeFirewallRule()
 	_ = os.Remove(startMenuLink())
 	_ = registry.DeleteKey(registry.LOCAL_MACHINE, uninstallKey)
 	_ = registry.DeleteKey(registry.LOCAL_MACHINE, appRegKey)
-	var lastErr error
-	for i := 0; i < 10; i++ {
-		if lastErr = os.RemoveAll(InstallDir); lastErr == nil {
-			break
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+
+	pending := removeTree(InstallDir)
 	if removeData {
-		_ = os.RemoveAll(DataDir)
+		pending += removeTree(DataDir)
 	} else {
-		_ = os.RemoveAll(filepath.Join(DataDir, "bin"))
-		_ = os.RemoveAll(filepath.Join(DataDir, "downloads"))
+		pending += removeTree(filepath.Join(DataDir, "bin"))
+		pending += removeTree(filepath.Join(DataDir, "downloads"))
 	}
 	msg := "Windstream has been removed."
 	if !removeData {
 		msg += "\n\nYour accounts and settings were kept in " + DataDir + "."
 	}
-	if lastErr != nil {
-		msg += "\n\nSome files could not be deleted: " + lastErr.Error()
+	if pending > 0 {
+		msg += "\n\nA few files that were in use will be deleted when you restart the PC."
 	}
 	messageBox(msg, mbOK|mbIconInfo)
+}
 
-	// Delete this temporary uninstaller after it exits.
-	_ = hiddenCmdLine(system32("cmd.exe"), fmt.Sprintf(`cmd.exe /c ping -n 3 127.0.0.1 >nul & del /f /q "%s"`, self)).Start()
-	return nil
+// removeTree deletes dir; anything locked is scheduled for deletion at the
+// next reboot. It returns how many items were deferred.
+func removeTree(dir string) int {
+	if err := os.RemoveAll(dir); err == nil {
+		return 0
+	}
+	deferred := 0
+	var dirs []string
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			dirs = append(dirs, path)
+			return nil
+		}
+		if os.Remove(path) != nil {
+			if p, err := windows.UTF16PtrFromString(path); err == nil &&
+				windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT) == nil {
+				deferred++
+			}
+		}
+		return nil
+	})
+	for i := len(dirs) - 1; i >= 0; i-- { // deepest first
+		if os.Remove(dirs[i]) != nil {
+			if p, err := windows.UTF16PtrFromString(dirs[i]); err == nil &&
+				windows.MoveFileEx(p, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT) == nil {
+				deferred++
+			}
+		}
+	}
+	return deferred
 }
 
 // mappedPorts reads the ports Windstream used (they may have been moved off

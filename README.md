@@ -16,6 +16,23 @@ HTTPS link with two-step sign-in. Windstream is one program, `Windstream.exe`.
 
 There are no scripts, config files or command lines to deal with.
 
+### If Microsoft Defender blocks it
+
+Windstream is not code-signed yet. It installs itself, starts at sign-in,
+opens network ports and accepts remote keyboard, mouse and controller input.
+That is what remote-play software does, but to Defender's machine-learning
+checks an unsigned program doing it can look like a backdoor
+(e.g. `Behavior:Win32/Persistence.A!ml`). To restore it:
+
+1. Open **Windows Security → Virus & threat protection → Protection history**.
+2. Open the Windstream entry, choose **Actions → Allow on device**, and confirm.
+3. Run `Windstream.exe` again.
+
+Please also report the false positive at
+<https://www.microsoft.com/wdsi/filesubmission> (choose *Incorrectly detected
+as malware*). The lasting fix is signing the executable; see *Code signing*
+below.
+
 ## What the program does for you
 
 - **Installs itself.** It copies itself to `C:\Program Files\Windstream`,
@@ -76,6 +93,13 @@ There are no scripts, config files or command lines to deal with.
 - **Uninstalling.** Use *Apps & features → Windstream*, or the button at the
   bottom of the dashboard. ViGEmBus stays installed, because other apps share
   it. Remove it separately under *Apps & features* if you want.
+
+## Code signing
+
+Unsigned executables get no reputation with SmartScreen or Defender. The
+cheapest route is Azure Trusted Signing (about $10/month; individuals in the
+US and Canada can enroll). Once an account exists, add a signing step to
+`.github/workflows/release.yml` using `azure/trusted-signing-action`.
 
 ## Development
 

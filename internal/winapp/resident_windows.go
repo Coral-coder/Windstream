@@ -25,9 +25,10 @@ var trayIcon []byte
 type RunFunc func(ctx context.Context, platform control.Platform, onReady func(*control.Controller)) error
 
 type platform struct {
-	quit     func()
-	mu       sync.Mutex
-	panelURL string
+	quit      func()
+	uninstall *bool // set when the dashboard asked to uninstall
+	mu        sync.Mutex
+	panelURL  string
 }
 
 // PanelReady records the dashboard address for the tray and for the
@@ -68,10 +69,12 @@ func (p *platform) SteamExe() string {
 	return v
 }
 
+// Uninstall shuts the app down cleanly (restoring the display and closing
+// router ports) and then removes it, all within this process.
 func (p *platform) Uninstall(removeData bool) error {
-	if err := StartUninstall(removeData); err != nil {
-		return err
-	}
+	p.mu.Lock()
+	p.uninstall = &removeData
+	p.mu.Unlock()
 	p.quit()
 	return nil
 }
@@ -163,10 +166,17 @@ func Resident(run RunFunc) error {
 		}()
 	}
 	systray.Run(onReady, func() { quit() })
+	var runErr error
 	select {
-	case err := <-done:
-		return err
+	case runErr = <-done:
 	case <-time.After(15 * time.Second):
+	}
+	plat.mu.Lock()
+	uninstall := plat.uninstall
+	plat.mu.Unlock()
+	if uninstall != nil {
+		performUninstall(*uninstall)
 		return nil
 	}
+	return runErr
 }
