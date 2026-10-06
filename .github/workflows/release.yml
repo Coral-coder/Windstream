@@ -1,0 +1,45 @@
+name: release
+
+# Publishes a GitHub Release with ready-to-run executables whenever a tag
+# starting with "v" is pushed, e.g.:  git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Build executables
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            out=dist/Windstream.exe
+            [ "$arch" = arm64 ] && out=dist/Windstream-arm64.exe
+            GOOS=windows GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X main.version=$VERSION -H=windowsgui" -o "$out" ./cmd/windstream
+          done
+          (cd dist && sha256sum *.exe > SHA256SUMS.txt && cat SHA256SUMS.txt)
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<'NOTES'
+          **Download `Windstream.exe`** (or `Windstream-arm64.exe` for ARM PCs), put it on your gaming PC and double-click it.
+
+          It asks for administrator permission once, installs itself, and opens the setup page in your browser.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" dist/Windstream.exe dist/Windstream-arm64.exe dist/SHA256SUMS.txt \
+            --title "Windstream ${GITHUB_REF_NAME}" --notes-file notes.md --latest

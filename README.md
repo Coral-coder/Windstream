@@ -5,8 +5,9 @@ HTTPS link with two-step sign-in. Windstream is one program, `Windstream.exe`.
 
 ## Using it
 
-1. Download `Windstream.exe` (the **Windstream** artifact of the latest
-   [CI run](../../actions)) onto the gaming PC and double-click it.
+1. Download `Windstream.exe` from the
+   [latest release](../../releases/latest) onto the gaming PC and
+   double-click it.
 2. Approve the one Windows administrator prompt.
 3. Your browser opens the Windstream dashboard. Create your account and scan
    the QR code with an authenticator app.
@@ -85,6 +86,10 @@ a test pattern, test audio and the system's ffmpeg:
 make run-dev       # dashboard at http://127.0.0.1:47333, stream at https://localhost:8443
 make lint test     # vet (Linux + Windows) and race tests, incl. ffmpeg/WebRTC integration
 make exe           # dist/Windstream.exe
+
+Releasing: push a tag starting with `v` (`git tag v1.0.1 && git push origin v1.0.1`).
+GitHub Actions builds `Windstream.exe` and `Windstream-arm64.exe` and publishes
+them as a release.
 make resources     # regenerate the exe icon/manifest and tray icon
 ```
 
