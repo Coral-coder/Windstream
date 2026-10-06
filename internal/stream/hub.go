@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -263,8 +264,21 @@ func (h *Hub) stopPipelinesLocked() {
 	}
 }
 
+// recoverPipeline keeps a Go panic in a capture pipeline (e.g. a display or
+// encoder edge case) from crashing the whole process; the pipeline simply
+// stops and the error shows on the dashboard.
+func (h *Hub) recoverPipeline(which string) {
+	if r := recover(); r != nil {
+		h.log.Error("capture pipeline crashed (recovered)", "pipeline", which, "panic", r, "stack", string(debug.Stack()))
+		h.mu.Lock()
+		h.lastErr = fmt.Sprintf("%s pipeline error: %v", which, r)
+		h.mu.Unlock()
+	}
+}
+
 func (h *Hub) runVideo(ctx context.Context) {
 	defer h.pipeWG.Done()
+	defer h.recoverPipeline("video")
 	backoff := time.Second
 	if h.cfg.Acquire != nil {
 		for {
@@ -385,6 +399,7 @@ func (h *Hub) onVideoPacket(p wsmedia.VideoPacket) {
 
 func (h *Hub) runAudio(ctx context.Context) {
 	defer h.pipeWG.Done()
+	defer h.recoverPipeline("audio")
 	backoff := 2 * time.Second
 	for ctx.Err() == nil {
 		h.log.Info("starting audio pipeline", "backend", h.cfg.Audio.Backend, "device", h.cfg.Audio.Device)
