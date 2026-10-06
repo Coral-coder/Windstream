@@ -10,8 +10,6 @@ import (
 	"github.com/coral-coder/windstream/internal/control"
 )
 
-const defaultPanelAddr = "127.0.0.1:47333"
-
 type appOptions struct {
 	DataDir   string
 	PanelAddr string
@@ -24,9 +22,6 @@ type appOptions struct {
 // runApp starts the controller with logging to <data>/logs/windstream.log
 // and the dashboard's in-memory log view.
 func runApp(ctx context.Context, o appOptions) error {
-	if o.PanelAddr == "" {
-		o.PanelAddr = defaultPanelAddr
-	}
 	if err := os.MkdirAll(filepath.Join(o.DataDir, "logs"), 0o700); err != nil {
 		return err
 	}

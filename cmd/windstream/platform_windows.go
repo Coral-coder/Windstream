@@ -14,16 +14,17 @@ import (
 // program: double-click (no arguments) installs or opens Windstream.
 func platformMain(args []string) bool {
 	winapp.Version = version
-	panelURL := "http://" + defaultPanelAddr + "/"
 	var err error
 	switch {
 	case len(args) == 0:
-		err = winapp.Launch(panelURL)
+		err = winapp.Launch()
 	case args[0] == "--install":
 		err = winapp.InstallFromArgs(args[1:])
 	case args[0] == "--run":
-		err = winapp.Resident(panelURL, func(ctx context.Context, p control.Platform, onReady func(*control.Controller)) error {
-			return runApp(ctx, appOptions{DataDir: winapp.DataDir, PanelAddr: defaultPanelAddr, Platform: p, OnReady: onReady})
+		err = winapp.Resident(func(ctx context.Context, p control.Platform, onReady func(*control.Controller)) error {
+			// Empty PanelAddr: the controller uses the saved dashboard port,
+			// moving to a free one if another program holds it.
+			return runApp(ctx, appOptions{DataDir: winapp.DataDir, Platform: p, OnReady: onReady})
 		})
 	case args[0] == "--uninstall":
 		err = winapp.Uninstall(args[1:])

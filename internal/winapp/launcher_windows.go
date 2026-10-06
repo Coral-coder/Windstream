@@ -5,6 +5,9 @@ package winapp
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+
+	"golang.org/x/sys/windows/registry"
 	"net/http"
 	"os"
 	"time"
@@ -23,20 +26,36 @@ func runningVersion(panelURL string) string {
 		return ""
 	}
 	var st struct {
-		Version string `json:"version"`
+		Version     *string `json:"version"`
+		SetupNeeded *bool   `json:"setup_needed"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&st) != nil || st.Version == "" {
-		return "?"
+	// Anything else answering on this port is not Windstream.
+	if json.NewDecoder(resp.Body).Decode(&st) != nil || st.Version == nil || st.SetupNeeded == nil {
+		return ""
 	}
-	return st.Version
+	return *st.Version
 }
 
-func panelUp(panelURL string) bool { return runningVersion(panelURL) != "" }
+// PanelURL is where the running Windstream's dashboard listens: the address
+// it last published in the registry, or the default.
+func PanelURL() string {
+	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, appRegKey, registry.QUERY_VALUE); err == nil {
+		defer k.Close()
+		if v, _, err := k.GetStringValue("PanelURL"); err == nil && strings.HasPrefix(v, "http://127.0.0.1:") {
+			return v
+		}
+	}
+	return DefaultPanelURL
+}
+
+// DefaultPanelURL is used before Windstream has ever started.
+const DefaultPanelURL = "http://127.0.0.1:47333/"
 
 // Launch is what happens on double-click: open the dashboard if Windstream
 // is running; otherwise install/update (one UAC prompt), start it, and open
 // the dashboard once it is up.
-func Launch(panelURL string) error {
+func Launch() error {
+	panelURL := PanelURL()
 	self, err := os.Executable()
 	if err != nil {
 		return err
@@ -69,8 +88,9 @@ func Launch(panelURL string) error {
 		}
 	}
 	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
-		if v := runningVersion(panelURL); v == Version || v == "?" {
-			openURL(panelURL)
+		// The app may have moved the dashboard to a free port: re-read it.
+		if url := PanelURL(); runningVersion(url) == Version {
+			openURL(url)
 			return nil
 		}
 	}

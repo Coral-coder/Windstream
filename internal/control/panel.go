@@ -19,6 +19,7 @@ import (
 
 	"github.com/coral-coder/windstream/internal/auth"
 	"github.com/coral-coder/windstream/internal/config"
+	"github.com/coral-coder/windstream/internal/netx"
 	"github.com/coral-coder/windstream/web"
 )
 
@@ -44,7 +45,7 @@ type pendingUser struct {
 }
 
 func newPanel(c *Controller) *panel {
-	_, port, _ := net.SplitHostPort(c.opts.PanelAddr)
+	_, port, _ := net.SplitHostPort(c.panelAddr)
 	return &panel{
 		c:        c,
 		sessions: auth.NewSessionStore(12*time.Hour, 7*24*time.Hour),
@@ -55,9 +56,9 @@ func newPanel(c *Controller) *panel {
 }
 
 func (p *panel) run(ctx context.Context) error {
-	ln, err := net.Listen("tcp", p.c.opts.PanelAddr)
+	ln, err := net.Listen("tcp", p.c.panelAddr)
 	if err != nil {
-		return fmt.Errorf("dashboard port %s is busy (is Windstream already running?): %w", p.c.opts.PanelAddr, err)
+		return fmt.Errorf("dashboard port %s is busy: %w", p.c.panelAddr, err)
 	}
 	srv := &http.Server{Handler: p.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second}
 	go func() {
@@ -183,6 +184,8 @@ type Settings struct {
 	UPnP          bool   `json:"upnp"`
 	CustomDomain  string `json:"custom_domain"`
 	MaxClients    int    `json:"max_clients"`
+	HTTPSPort     int    `json:"https_port"`
+	MediaPort     int    `json:"media_port"`
 }
 
 func settingsFrom(cfg config.Config) Settings {
@@ -193,6 +196,7 @@ func settingsFrom(cfg config.Config) Settings {
 		Audio: cfg.Audio.Enabled, Gamepads: cfg.Input.Gamepads, KeyboardMouse: cfg.Input.Keyboard && cfg.Input.Mouse,
 		LaunchSteam: len(cfg.Display.Launch) > 0 && strings.Contains(strings.ToLower(cfg.Display.Launch[0]), "steam"),
 		UPnP:        cfg.Network.UPnP, CustomDomain: cfg.Network.CustomDomain, MaxClients: cfg.Server.MaxClients,
+		HTTPSPort: cfg.ListenPort(), MediaPort: cfg.WebRTC.UDPPort,
 	}
 }
 
@@ -225,6 +229,8 @@ func (p *panel) handleState(w http.ResponseWriter, r *http.Request) {
 	resp["deps"] = p.c.deps.Snapshot()
 	resp["network"] = ns
 	resp["stream"] = p.c.stackStatus()
+	resp["https_error"] = p.c.httpsError()
+	resp["panel_url"] = p.c.PanelURL()
 	resp["settings"] = settingsFrom(cfg)
 	resp["steam_found"] = p.c.opts.Platform != nil && p.c.opts.Platform.SteamExe() != ""
 	resp["lan_fingerprint"] = p.c.tls.SelfSignedFingerprint()
@@ -458,11 +464,36 @@ func (p *panel) handleSettings(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "Custom domain must be a hostname like games.example.com")
 		return
 	}
+	cur := p.c.Config()
+	if s.HTTPSPort == 0 {
+		s.HTTPSPort = cur.ListenPort()
+	}
+	if s.MediaPort == 0 {
+		s.MediaPort = cur.WebRTC.UDPPort
+	}
+	if s.HTTPSPort < 1 || s.HTTPSPort > 65535 || s.MediaPort < 1 || s.MediaPort > 65535 {
+		jsonErr(w, http.StatusBadRequest, "Ports must be between 1 and 65535")
+		return
+	}
+	if s.HTTPSPort == cur.Server.PanelPort {
+		jsonErr(w, http.StatusBadRequest, fmt.Sprintf("Port %d is used by this dashboard; pick another", s.HTTPSPort))
+		return
+	}
+	httpsChanged := s.HTTPSPort != cur.ListenPort()
+	mediaChanged := s.MediaPort != cur.WebRTC.UDPPort
+	if httpsChanged && !netx.TCPFree(s.HTTPSPort) {
+		jsonErr(w, http.StatusBadRequest, fmt.Sprintf("TCP port %d is already in use by another program", s.HTTPSPort))
+		return
+	}
+	if mediaChanged && !netx.UDPFree(s.MediaPort) {
+		jsonErr(w, http.StatusBadRequest, fmt.Sprintf("UDP port %d is already in use by another program", s.MediaPort))
+		return
+	}
 	steam := ""
 	if p.c.opts.Platform != nil {
 		steam = p.c.opts.Platform.SteamExe()
 	}
-	netChanged := false
+	netChanged := httpsChanged || mediaChanged
 	err := p.c.update(func(c *config.Config) error {
 		c.Display.Width, c.Display.Height, c.Display.Refresh = width, height, s.Refresh
 		c.Video.FPS, c.Video.BitrateKbps, c.Video.Encoder = s.FPS, s.BitrateMbps*1000, s.Encoder
@@ -479,8 +510,10 @@ func (p *panel) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if s.LaunchSteam && steam != "" {
 			c.Display.Launch = []string{steam, "steam://open/bigpicture"}
 		}
-		netChanged = c.Network.UPnP != s.UPnP || c.Network.CustomDomain != s.CustomDomain
+		netChanged = netChanged || c.Network.UPnP != s.UPnP || c.Network.CustomDomain != s.CustomDomain
 		c.Network.UPnP, c.Network.CustomDomain = s.UPnP, s.CustomDomain
+		c.Server.Listen = fmt.Sprintf(":%d", s.HTTPSPort)
+		c.WebRTC.UDPPort = s.MediaPort
 		if s.MaxClients >= 1 && s.MaxClients <= 8 {
 			c.Server.MaxClients = s.MaxClients
 		}
@@ -489,6 +522,9 @@ func (p *panel) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		jsonErr(w, http.StatusBadRequest, trimErr(err))
 		return
+	}
+	if httpsChanged {
+		p.c.restartHTTPS()
 	}
 	if netChanged {
 		p.c.restartNetwork()

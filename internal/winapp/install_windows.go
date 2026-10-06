@@ -22,6 +22,7 @@ import (
 const (
 	taskName      = "Windstream"
 	uninstallKey  = `Software\Microsoft\Windows\CurrentVersion\Uninstall\Windstream`
+	appRegKey     = `Software\Windstream`
 	firewallRule  = "Windstream"
 	residentMutex = `Local\WindstreamResident`
 	quitEvent     = `Local\WindstreamQuit`

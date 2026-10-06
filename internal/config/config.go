@@ -4,8 +4,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -72,6 +74,8 @@ type Server struct {
 	BehindProxy bool `toml:"behind_proxy"`
 	// MaxClients caps concurrent streaming sessions.
 	MaxClients int `toml:"max_clients"`
+	// PanelPort is the loopback port of the desktop app's dashboard.
+	PanelPort int `toml:"panel_port"`
 }
 
 // TLS selects the certificate source. Exactly one of cert files, ACME, or
@@ -218,7 +222,7 @@ type Log struct {
 // Default returns the baseline configuration.
 func Default() Config {
 	return Config{
-		Server: Server{Listen: ":8443", MaxClients: 2},
+		Server: Server{Listen: ":8443", MaxClients: 2, PanelPort: 47333},
 		TLS:    TLS{ACMECacheDir: "acme-cache"},
 		Auth: Auth{
 			SessionIdleTimeout: Duration{12 * time.Hour},
@@ -303,6 +307,9 @@ func (c *Config) Validate() error {
 
 	if strings.TrimSpace(c.Server.Listen) == "" {
 		add("server.listen must be set")
+	}
+	if c.Server.PanelPort < 1 || c.Server.PanelPort > 65535 {
+		add("server.panel_port must be 1..65535")
 	}
 	if c.Server.MaxClients < 1 {
 		add("server.max_clients must be >= 1")
@@ -454,3 +461,16 @@ func (v Video) GOPFrames() int {
 // IncludeLoopbackCandidate reports whether loopback ICE candidates should be
 // advertised (local testing only).
 func (w WebRTC) IncludeLoopbackCandidate() bool { return w.IncludeLoopback }
+
+// ListenPort returns the port of server.listen (0 if unparseable).
+func (c Config) ListenPort() int {
+	_, p, err := net.SplitHostPort(c.Server.Listen)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return 0
+	}
+	return n
+}

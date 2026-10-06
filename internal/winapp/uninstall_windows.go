@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/windows/registry"
 
+	"github.com/coral-coder/windstream/internal/config"
 	"github.com/coral-coder/windstream/internal/deps"
 	"github.com/coral-coder/windstream/internal/netx"
 )
@@ -83,7 +84,7 @@ func Uninstall(args []string) error {
 	stopResident(20 * time.Second)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	netx.RemoveMappings(ctx, netx.Ports{HTTPSInternal: 8443, HTTPSExternal: 443, MediaUDP: 8444})
+	netx.RemoveMappings(ctx, mappedPorts())
 	cancel()
 
 	if _, err := os.Stat(filepath.Join(DataDir, "vdd.installed")); err == nil {
@@ -96,6 +97,7 @@ func Uninstall(args []string) error {
 	removeFirewallRule()
 	_ = os.Remove(startMenuLink())
 	_ = registry.DeleteKey(registry.LOCAL_MACHINE, uninstallKey)
+	_ = registry.DeleteKey(registry.LOCAL_MACHINE, appRegKey)
 	var lastErr error
 	for i := 0; i < 10; i++ {
 		if lastErr = os.RemoveAll(InstallDir); lastErr == nil {
@@ -121,4 +123,17 @@ func Uninstall(args []string) error {
 	// Delete this temporary uninstaller after it exits.
 	_ = hiddenCmdLine(system32("cmd.exe"), fmt.Sprintf(`cmd.exe /c ping -n 3 127.0.0.1 >nul & del /f /q "%s"`, self)).Start()
 	return nil
+}
+
+// mappedPorts reads the ports Windstream used (they may have been moved off
+// the defaults) so their router mappings can be removed.
+func mappedPorts() netx.Ports {
+	ports := netx.Ports{HTTPSInternal: 8443, HTTPSExternal: 443, MediaUDP: 8444}
+	if cfg, err := config.Load(filepath.Join(DataDir, "windstream.toml")); err == nil {
+		ports.HTTPSInternal = uint16(cfg.ListenPort())
+		ports.HTTPSExternal = uint16(cfg.Network.HTTPSExternalPort)
+		ports.MediaUDP = uint16(cfg.WebRTC.UDPPort)
+		ports.MediaTCP = uint16(cfg.WebRTC.TCPPort)
+	}
+	return ports
 }

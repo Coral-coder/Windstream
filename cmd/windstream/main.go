@@ -228,7 +228,7 @@ func cmdApp(args []string) error {
 	fs := flag.NewFlagSet("app", flag.ExitOnError)
 	dataDir := fs.String("data", "windstream-data", "data directory")
 	dev := fs.Bool("dev", false, "test pattern, no drivers or router changes")
-	panelAddr := fs.String("panel", defaultPanelAddr, "dashboard address (loopback)")
+	panelAddr := fs.String("panel", "", "dashboard address (default: 127.0.0.1:47333, or a free port)")
 	_ = fs.Parse(args)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -34,12 +34,17 @@ type Platform interface {
 	Uninstall(removeData bool) error
 	// Quit stops the app.
 	Quit()
+	// PanelReady publishes the dashboard address (it can move off the
+	// default port if something else uses it).
+	PanelReady(url string)
 }
 
 // Options configures a controller.
 type Options struct {
-	DataDir   string
-	PanelAddr string // loopback address of the dashboard, e.g. 127.0.0.1:47333
+	DataDir string
+	// PanelAddr forces the dashboard address; empty = 127.0.0.1:<panel_port>,
+	// moving to a free port if that one is taken.
+	PanelAddr string
 	Version   string
 	Log       *slog.Logger
 	Logs      *LogBuffer
@@ -73,7 +78,13 @@ type Controller struct {
 	stackMode  string
 	restartReq chan struct{}
 
-	panel *panel
+	panel     *panel
+	panelAddr string
+
+	httpsMu     sync.Mutex
+	httpsCancel context.CancelFunc
+	httpsDone   chan struct{}
+	httpsErr    string
 
 	netMu     sync.Mutex
 	netCancel context.CancelFunc
@@ -157,26 +168,115 @@ func (c *Controller) ports() netx.Ports {
 }
 
 // PanelURL is the dashboard address.
-func (c *Controller) PanelURL() string { return "http://" + c.opts.PanelAddr + "/" }
+func (c *Controller) PanelURL() string { return "http://" + c.panelAddr + "/" }
 
-// Run blocks until ctx is cancelled.
-func (c *Controller) Run(ctx context.Context) error {
+// ensurePorts moves any port another program already uses to a free one and
+// saves the choice, so the app starts no matter what else runs on the PC.
+func (c *Controller) ensurePorts() error {
 	cfg := c.Config()
-	var err error
-	c.srv, err = server.New(&cfg, nil, c.log, server.Options{
+	https, media, iceTCP, panelPort := cfg.ListenPort(), cfg.WebRTC.UDPPort, cfg.WebRTC.TCPPort, cfg.Server.PanelPort
+	changed := false
+	if https == 0 || !netx.TCPFree(https) {
+		p, err := netx.PickPort(netx.TCPFree, []int{8443, 9443, 10443, 18443, 28443}, panelPort, iceTCP)
+		if err != nil {
+			return fmt.Errorf("no free port for HTTPS: %w", err)
+		}
+		c.log.Warn("HTTPS port is in use by another program; switching", "busy", https, "now", p)
+		https, changed = p, true
+	}
+	if !netx.UDPFree(media) {
+		p, err := netx.PickPort(netx.UDPFree, []int{8444, 9444, 10444, 18444, 28444})
+		if err != nil {
+			return fmt.Errorf("no free UDP port for media: %w", err)
+		}
+		c.log.Warn("media UDP port is in use by another program; switching", "busy", media, "now", p)
+		media, changed = p, true
+	}
+	if iceTCP != 0 && !netx.TCPFree(iceTCP) {
+		p, err := netx.PickPort(netx.TCPFree, []int{media, 9445, 10445}, https, panelPort)
+		if err != nil {
+			return fmt.Errorf("no free TCP port for media fallback: %w", err)
+		}
+		iceTCP, changed = p, true
+	}
+	if c.opts.PanelAddr != "" {
+		c.panelAddr = c.opts.PanelAddr
+	} else {
+		if !netx.LoopbackTCPFree(panelPort) {
+			p, err := netx.PickPort(netx.LoopbackTCPFree, []int{47333, 47334, 47335, 47336, 47337, 47338}, https, iceTCP)
+			if err != nil {
+				return fmt.Errorf("no free port for the dashboard: %w", err)
+			}
+			c.log.Warn("dashboard port is in use by another program; switching", "busy", panelPort, "now", p)
+			panelPort, changed = p, true
+		}
+		c.panelAddr = fmt.Sprintf("127.0.0.1:%d", panelPort)
+	}
+	if !changed {
+		return nil
+	}
+	return c.update(func(cf *config.Config) error {
+		cf.Server.Listen = fmt.Sprintf(":%d", https)
+		cf.WebRTC.UDPPort, cf.WebRTC.TCPPort, cf.Server.PanelPort = media, iceTCP, panelPort
+		return nil
+	})
+}
+
+// restartHTTPS (re)starts the public HTTPS server on the configured port.
+// Failures are shown on the dashboard instead of stopping the app.
+func (c *Controller) restartHTTPS() {
+	c.httpsMu.Lock()
+	defer c.httpsMu.Unlock()
+	if c.httpsCancel != nil {
+		c.httpsCancel()
+		<-c.httpsDone
+	}
+	cfg := c.Config()
+	srv, err := server.New(&cfg, nil, c.log, server.Options{
 		Auth: c.auth, Sessions: c.sessions, Limiter: c.limiter, GetCertificate: c.tls.GetCertificate,
 	})
 	if err != nil {
+		c.httpsErr = err.Error()
+		return
+	}
+	c.stackMu.Lock()
+	srv.SetHub(c.hub)
+	c.srv = srv
+	c.stackMu.Unlock()
+	ctx, cancel := context.WithCancel(c.runCtx)
+	done := make(chan struct{})
+	c.httpsCancel, c.httpsDone, c.httpsErr = cancel, done, ""
+	go func() {
+		defer close(done)
+		if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
+			c.log.Error("HTTPS server stopped", "error", err)
+			c.httpsMu.Lock()
+			c.httpsErr = err.Error()
+			c.httpsMu.Unlock()
+		}
+	}()
+}
+
+func (c *Controller) httpsError() string {
+	c.httpsMu.Lock()
+	defer c.httpsMu.Unlock()
+	return c.httpsErr
+}
+
+// Run blocks until ctx is cancelled.
+func (c *Controller) Run(ctx context.Context) error {
+	c.runCtx = ctx
+	if err := c.ensurePorts(); err != nil {
 		return err
 	}
 	c.panel = newPanel(c)
 	panelErr := make(chan error, 1)
 	go func() { panelErr <- c.panel.run(ctx) }()
+	if c.opts.Platform != nil {
+		c.opts.Platform.PanelReady(c.PanelURL())
+	}
 
-	srvErr := make(chan error, 1)
-	go func() { srvErr <- c.srv.Run(ctx) }()
-
-	c.runCtx = ctx
+	c.restartHTTPS()
 	c.restartNetwork()
 
 	go func() {
@@ -189,16 +289,18 @@ func (c *Controller) Run(ctx context.Context) error {
 		c.requestRestart()
 	}()
 
-	c.log.Info("windstream running", "dashboard", c.PanelURL(), "version", c.opts.Version)
+	c.log.Info("windstream running", "dashboard", c.PanelURL(), "https_port", c.Config().ListenPort(),
+		"media_udp_port", c.Config().WebRTC.UDPPort, "version", c.opts.Version)
 	for {
 		select {
 		case <-ctx.Done():
 			c.stopStack()
-			<-srvErr
+			c.httpsMu.Lock()
+			if c.httpsDone != nil {
+				<-c.httpsDone
+			}
+			c.httpsMu.Unlock()
 			return nil
-		case err := <-srvErr:
-			c.stopStack()
-			return fmt.Errorf("https server: %w", err)
 		case err := <-panelErr:
 			if err != nil {
 				c.stopStack()

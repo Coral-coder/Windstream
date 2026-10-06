@@ -55,8 +55,14 @@ type mapping struct {
 // NewManager creates a manager. onChange is called whenever the public IP or
 // hostname changes.
 func NewManager(log *slog.Logger, ports Ports, useUPnP bool, customDomain string, onChange func(Status)) *Manager {
-	return &Manager{log: log, ports: ports, upnp: useUPnP, customDomain: customDomain,
+	m := &Manager{log: log, ports: ports, upnp: useUPnP, customDomain: customDomain,
 		stunServer: "stun.l.google.com:19302", onChange: onChange}
+	// The home-network address is known immediately; the public one follows.
+	if lan := LANIP(); lan != nil {
+		m.status.LANIP = lan.String()
+		m.status.LANURL = fmt.Sprintf("https://%s:%d", lan, ports.HTTPSInternal)
+	}
+	return m
 }
 
 // Status returns the latest status.

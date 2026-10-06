@@ -25,7 +25,30 @@ var trayIcon []byte
 type RunFunc func(ctx context.Context, platform control.Platform, onReady func(*control.Controller)) error
 
 type platform struct {
-	quit func()
+	quit     func()
+	mu       sync.Mutex
+	panelURL string
+}
+
+// PanelReady records the dashboard address for the tray and for the
+// launcher (which reads it from the registry; it cannot read ProgramData).
+func (p *platform) PanelReady(url string) {
+	p.mu.Lock()
+	p.panelURL = url
+	p.mu.Unlock()
+	if k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, appRegKey, registry.SET_VALUE); err == nil {
+		_ = k.SetStringValue("PanelURL", url)
+		k.Close()
+	}
+}
+
+func (p *platform) panel() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.panelURL != "" {
+		return p.panelURL
+	}
+	return PanelURL()
 }
 
 func (p *platform) SteamExe() string {
@@ -57,7 +80,7 @@ func (p *platform) Quit() { p.quit() }
 
 // Resident is the long-running app started at logon: one instance per
 // session, a tray icon, and the controller underneath.
-func Resident(panelURL string, run RunFunc) error {
+func Resident(run RunFunc) error {
 	mname, _ := windows.UTF16PtrFromString(residentMutex)
 	mutex, err := windows.CreateMutex(nil, true, mname)
 	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
@@ -98,7 +121,7 @@ func Resident(panelURL string, run RunFunc) error {
 		mLink := systray.AddMenuItem("Open my stream link", "Open the address you play from")
 		systray.AddSeparator()
 		mQuit := systray.AddMenuItem("Quit Windstream", "Stop streaming and close")
-		systray.SetOnTapped(func() { openURL(panelURL) })
+		systray.SetOnTapped(func() { openURL(plat.panel()) })
 
 		go func() {
 			done <- run(ctx, plat, func(c *control.Controller) {
@@ -116,7 +139,7 @@ func Resident(panelURL string, run RunFunc) error {
 				case <-ctx.Done():
 					return
 				case <-mOpen.ClickedCh:
-					openURL(panelURL)
+					openURL(plat.panel())
 				case <-mLink.ClickedCh:
 					ctrlMu.Lock()
 					c := ctrl
@@ -124,7 +147,7 @@ func Resident(panelURL string, run RunFunc) error {
 					if c != nil && c.Link() != "" {
 						openURL(c.Link())
 					} else {
-						openURL(panelURL)
+						openURL(plat.panel())
 					}
 				case <-mQuit.ClickedCh:
 					quit()

@@ -90,6 +90,7 @@ form.addEventListener('submit', (ev) => {
       make_primary: !!fd.get('make_primary'), audio: !!fd.get('audio'), gamepads: !!fd.get('gamepads'),
       keyboard_mouse: !!fd.get('keyboard_mouse'), launch_steam: !!fd.get('launch_steam'),
       upnp: !!fd.get('upnp'), custom_domain: fd.get('custom_domain') || '', max_clients: +fd.get('max_clients') || 2,
+      https_port: +fd.get('https_port') || 0, media_port: +fd.get('media_port') || 0,
     };
     await api('/api/settings', s);
     settingsDirty = false;
@@ -115,6 +116,8 @@ function fillSettings(s) {
   for (const k of ['make_primary', 'audio', 'gamepads', 'keyboard_mouse', 'launch_steam', 'upnp']) form[k].checked = !!s[k];
   form.custom_domain.value = s.custom_domain || '';
   form.max_clients.value = s.max_clients;
+  form.https_port.value = s.https_port;
+  form.media_port.value = s.media_port;
   syncSettingsUI();
 }
 
@@ -221,7 +224,7 @@ function renderDash(s) {
 
   renderDeps(s.deps || []);
   const st = s.stream || {};
-  const err = st.error || (st.stats && st.stats.error);
+  const err = (s.https_error && `HTTPS server: ${s.https_error}`) || st.error || (st.stats && st.stats.error);
   $('#engine').textContent = err ? err : st.running ? `Ready (${st.mode === 'virtual' ? 'virtual screen, on while streaming' : st.mode === 'test' ? 'test pattern' : 'monitor'})` : 'Starting…';
   $('#clients').textContent = st.stats ? String(st.stats.clients) : '0';
   $('#encoder').textContent = (st.stats && st.stats.encoder) || 'chosen when someone connects';
@@ -231,6 +234,7 @@ function renderDash(s) {
     ? 'Automatic router setup is off. To use the link outside your home, add these port forwards in your router:'
     : "Your router didn't accept automatic setup. Add these port forwards in its settings:";
   $('#hostname').textContent = n.hostname || '—';
+  if (s.settings) $('#ports').textContent = `HTTPS ${s.settings.https_port}/TCP · media ${s.settings.media_port}/UDP`;
   $('#forward').classList.toggle('hidden', !(n.forward && n.forward.length));
   const fl = $('#forward-list'); fl.innerHTML = '';
   for (const f of n.forward || []) { const li = document.createElement('li'); li.textContent = f; fl.append(li); }

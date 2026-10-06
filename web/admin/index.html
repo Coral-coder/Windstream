@@ -78,6 +78,7 @@
       <div class="kv"><span>Router</span><b id="upnp"></b></div>
       <div class="kv"><span>Public IP</span><b id="pubip"></b></div>
       <div class="kv"><span>Address</span><b id="hostname"></b></div>
+      <div class="kv"><span>Ports on this PC</span><b id="ports"></b></div>
       <div id="forward" class="hidden"><p class="small muted" id="forward-why"></p><ul id="forward-list" class="small"></ul></div>
       <button id="btn-net" class="ghost small-btn">Re-check</button>
     </section>
@@ -108,6 +109,9 @@
         <label class="check"><input type="checkbox" name="upnp"> Open router ports automatically (UPnP)</label>
         <label>Own domain (optional) <input name="custom_domain" placeholder="games.example.com"></label>
         <label>People streaming at once <input name="max_clients" type="number" min="1" max="8"></label>
+        <label>HTTPS port on this PC (TCP) <input name="https_port" type="number" min="1" max="65535"></label>
+        <label>Video/audio port on this PC (UDP) <input name="media_port" type="number" min="1" max="65535"></label>
+        <p class="hint">Windstream picks free ports by itself. Only change these if you need specific ones; if a port is taken you'll be told.</p>
       </details>
       <div class="actions"><button type="submit">Save</button><span class="saved hidden" id="saved">Saved ✓</span><p class="error" data-error></p></div>
     </form>

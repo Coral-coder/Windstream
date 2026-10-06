@@ -112,3 +112,22 @@ func TestMapFallbacks(t *testing.T) {
 		t.Errorf("mappings left after unmap: %v", f.maps)
 	}
 }
+
+func TestPickPortSkipsBusy(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	busy := ln.Addr().(*net.TCPAddr).Port
+	if TCPFree(busy) {
+		t.Fatalf("port %d reported free while bound", busy)
+	}
+	p, err := PickPort(TCPFree, []int{busy})
+	if err != nil || p == busy || !TCPFree(p) {
+		t.Fatalf("picked %d (busy %d): %v", p, busy, err)
+	}
+	if p, _ := PickPort(func(int) bool { return true }, []int{busy, 9000}, busy); p != 9000 {
+		t.Fatalf("avoid list ignored: %d", p)
+	}
+}
