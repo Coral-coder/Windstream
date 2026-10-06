@@ -154,16 +154,28 @@ func InstallVDDDevice(infDir string) (rebootRequired bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("SetupDiCreateDeviceInfo: %w", err)
 	}
-	hwid := windows.StringToUTF16(VDDHardwareID + "\x00") // REG_MULTI_SZ: double NUL
-	hwidBytes := unsafe.Slice((*byte)(unsafe.Pointer(&hwid[0])), len(hwid)*2)
+	// SPDRP_HARDWAREID is a REG_MULTI_SZ (UTF-16LE, NUL between entries and a
+	// final NUL). Earlier this passed a string containing a NUL to
+	// StringToUTF16, which panics ("string with NUL"); regMultiSZ builds the
+	// bytes without that trap.
+	hwidBytes, err := regMultiSZ(VDDHardwareID)
+	if err != nil {
+		return false, fmt.Errorf("hardware ID: %w", err)
+	}
 	if err := set.SetDeviceRegistryProperty(data, windows.SPDRP_HARDWAREID, hwidBytes); err != nil {
 		return false, fmt.Errorf("set hardware ID: %w", err)
 	}
 	if err := set.CallClassInstaller(windows.DIF_REGISTERDEVICE, data); err != nil {
 		return false, fmt.Errorf("register device: %w", err)
 	}
-	hw, _ := windows.UTF16PtrFromString(VDDHardwareID)
-	infW, _ := windows.UTF16PtrFromString(inf)
+	hw, err := windows.UTF16PtrFromString(VDDHardwareID)
+	if err != nil {
+		return false, err
+	}
+	infW, err := windows.UTF16PtrFromString(inf)
+	if err != nil {
+		return false, fmt.Errorf("driver path: %w", err)
+	}
 	var reboot int32
 	r, _, callErr := procUpdateDriverForPlugAndPlayDevices.Call(0, uintptr(unsafe.Pointer(hw)), uintptr(unsafe.Pointer(infW)),
 		installflagForce, uintptr(unsafe.Pointer(&reboot)))
