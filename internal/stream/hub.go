@@ -49,13 +49,14 @@ type Config struct {
 
 // Stats is a point-in-time snapshot for the UI / logs.
 type Stats struct {
-	Error     string `json:"error,omitempty"`
-	Clients   int    `json:"clients"`
-	Encoder   string `json:"encoder"`
-	Running   bool   `json:"running"`
-	Frames    uint64 `json:"frames"`
-	Keyframes uint64 `json:"keyframes"`
-	Bytes     uint64 `json:"bytes"`
+	Error      string `json:"error,omitempty"`
+	AudioError string `json:"audio_error,omitempty"`
+	Clients    int    `json:"clients"`
+	Encoder    string `json:"encoder"`
+	Running    bool   `json:"running"`
+	Frames     uint64 `json:"frames"`
+	Keyframes  uint64 `json:"keyframes"`
+	Bytes      uint64 `json:"bytes"`
 }
 
 // Hub multiplexes one capture pipeline to every connected client.
@@ -76,6 +77,7 @@ type Hub struct {
 	encoder    string
 	candidates []string
 	lastErr    string
+	audioErr   string
 	pipeCancel context.CancelFunc
 	pipeWG     sync.WaitGroup
 	stopTimer  *time.Timer
@@ -196,8 +198,9 @@ func (h *Hub) Stats() Stats {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return Stats{
-		Error:   h.lastErr,
-		Clients: len(h.clients), Encoder: h.encoder, Running: h.pipeCancel != nil,
+		Error:      h.lastErr,
+		AudioError: h.audioErr,
+		Clients:    len(h.clients), Encoder: h.encoder, Running: h.pipeCancel != nil,
 		Frames: h.frames.Load(), Keyframes: h.keyframes.Load(), Bytes: h.bytes.Load(),
 	}
 }
@@ -401,16 +404,31 @@ func (h *Hub) runAudio(ctx context.Context) {
 	defer h.pipeWG.Done()
 	defer h.recoverPipeline("audio")
 	backoff := 2 * time.Second
+	lastErr := ""
 	for ctx.Err() == nil {
-		h.log.Info("starting audio pipeline", "backend", h.cfg.Audio.Backend, "device", h.cfg.Audio.Device)
 		start := time.Now()
 		err := wsmedia.RunAudio(ctx, h.cfg.Audio, h.log, func(s wsmedia.AudioSample) {
+			h.mu.Lock()
+			h.audioErr = ""
+			h.mu.Unlock()
 			_ = h.audio.WriteSample(media.Sample{Data: s.Data, Duration: s.Duration})
 		})
 		if ctx.Err() != nil {
 			return
 		}
-		h.log.Warn("audio pipeline stopped (video continues)", "error", err)
+		msg := "unknown error"
+		if err != nil {
+			msg = err.Error()
+		}
+		// Log and record only when the failure first appears or changes, so a
+		// box with no audio endpoint does not spam the log while retrying.
+		if msg != lastErr {
+			h.log.Warn("audio unavailable (video continues)", "error", msg)
+			lastErr = msg
+		}
+		h.mu.Lock()
+		h.audioErr = msg
+		h.mu.Unlock()
 		if time.Since(start) > 30*time.Second {
 			backoff = 2 * time.Second
 		}

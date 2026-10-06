@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -28,6 +29,27 @@ const (
 	waveFormatIEEEFloat  = 0x0003
 	waveFormatExtensible = 0xFFFE
 )
+
+// activateAudioClient calls IMMDevice::Activate(IID_IAudioClient, CLSCTX_ALL,
+// NULL, &ac) with the correct ABI (class context by value).
+func activateAudioClient(mmd *wca.IMMDevice) (*wca.IAudioClient, error) {
+	var ac *wca.IAudioClient
+	hr, _, _ := syscall.SyscallN(
+		mmd.VTable().Activate,
+		uintptr(unsafe.Pointer(mmd)),
+		uintptr(unsafe.Pointer(wca.IID_IAudioClient)),
+		uintptr(wca.CLSCTX_ALL),
+		0, // pActivationParams = NULL
+		uintptr(unsafe.Pointer(&ac)),
+	)
+	if hr != 0 {
+		return nil, ole.NewError(hr)
+	}
+	if ac == nil {
+		return nil, errors.New("Activate returned a nil audio client")
+	}
+	return ac, nil
+}
 
 func withCOM(fn func() error) error {
 	runtime.LockOSThread()
@@ -153,8 +175,12 @@ func runLoopback(ctx context.Context, device string, log *slog.Logger, start fun
 			return err
 		}
 		defer mmd.Release()
-		var ac *wca.IAudioClient
-		if err := mmd.Activate(wca.IID_IAudioClient, wca.CLSCTX_ALL, nil, &ac); err != nil {
+		// go-wca v0.3.0's IMMDevice.Activate passes dwClsCtx by pointer instead
+		// of by value, so Windows reads a garbage class-context and returns
+		// E_INVALIDARG ("The parameter is incorrect"). Call the vtable slot
+		// directly with the context passed by value.
+		ac, err := activateAudioClient(mmd)
+		if err != nil {
 			return fmt.Errorf("activate audio client: %w", err)
 		}
 		defer ac.Release()

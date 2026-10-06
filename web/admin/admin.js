@@ -228,6 +228,10 @@ function renderDash(s) {
   $('#engine').textContent = err ? err : st.running ? `Ready (${st.mode === 'virtual' ? 'virtual screen, on while streaming' : st.mode === 'test' ? 'test pattern' : 'monitor'})` : 'Starting…';
   $('#clients').textContent = st.stats ? String(st.stats.clients) : '0';
   $('#encoder').textContent = (st.stats && st.stats.encoder) || 'chosen when someone connects';
+  const aerr = st.stats && st.stats.audio_error;
+  $('#audio').textContent = !s.settings || !s.settings.audio ? 'off'
+    : aerr ? 'no audio device found on this PC' : st.running && st.stats && st.stats.clients ? 'on' : 'on when streaming';
+  $('#audio').title = aerr || '';
   $('#upnp').textContent = { mapped: 'Ports opened automatically ✓', disabled: 'Automatic setup off', unavailable: 'No UPnP router found', error: 'Router refused' }[n.upnp] || '…';
   $('#pubip').textContent = n.public_ip || (n.checked ? "Couldn't detect" : '…');
   $('#forward-why').textContent = n.upnp === 'disabled'
