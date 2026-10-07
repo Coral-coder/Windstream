@@ -1,7 +1,7 @@
 :root {
-  --bg: #0b1020; --panel: #131a2e; --panel2: #0f1527; --line: #1f2a46;
-  --text: #e6ebf5; --muted: #8b95b0; --accent: #5eead4; --accent-ink: #04121a;
-  --warn: #fbbf24; --danger: #fb7185; --ok: #4ade80;
+  --bg: #071a1f; --panel: #0e252b; --panel2: #0a1f24; --line: #1b3a40;
+  --text: #ecf4f1; --muted: #9aaec1; --accent: #4fc7b6; --accent-ink: #03211d;
+  --warn: #ffcf7a; --danger: #fb7185; --ok: #6ad7a8;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -25,14 +25,14 @@ main { margin: 28px auto; padding: 0 16px; }
 .stack { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
 label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
 label.check { flex-direction: row; align-items: center; gap: 10px; color: var(--text); font-size: 14px; }
-input, select { padding: 10px 12px; border-radius: 10px; border: 1px solid #263150; background: var(--panel2); color: var(--text); font-size: 15px; }
+input, select { padding: 10px 12px; border-radius: 10px; border: 1px solid #23464c; background: var(--panel2); color: var(--text); font-size: 15px; }
 input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); padding: 0; }
 input[type=range] { padding: 0; flex: 1; accent-color: var(--accent); }
 .range { display: flex; gap: 10px; align-items: center; color: var(--text); }
 input:focus, select:focus { outline: 2px solid var(--accent); border-color: transparent; }
 button { cursor: pointer; border: 0; border-radius: 10px; padding: 10px 16px; background: var(--accent); color: var(--accent-ink); font-weight: 650; font-size: 15px; }
-button.ghost { background: #1b2540; color: var(--text); }
-button.ghost:hover { background: #26335a; }
+button.ghost { background: #143338; color: var(--text); }
+button.ghost:hover { background: #1d454b; }
 button:disabled { opacity: .6; cursor: progress; }
 .small-btn { margin-top: 12px; padding: 7px 12px; font-size: 13px; }
 .error { color: var(--danger); margin: 0; min-height: 1.2em; font-size: 14px; }
@@ -46,11 +46,11 @@ button:disabled { opacity: .6; cursor: progress; }
 #link { font-size: 20px; font-weight: 700; color: var(--accent); word-break: break-all; text-decoration: none; }
 #link:hover { text-decoration: underline; }
 @media (max-width: 640px) { .hero { flex-direction: column; align-items: flex-start; } }
-.notice { margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(251,191,36,.1); border: 1px solid rgba(251,191,36,.35); color: #fde68a; font-size: 14px; }
+.notice { margin-top: 12px; padding: 12px 14px; border-radius: 10px; background: rgba(255,207,122,.1); border: 1px solid rgba(255,207,122,.35); color: #ffe2a8; font-size: 14px; }
 .checklist { list-style: none; padding: 0; margin: 0 0 14px; display: flex; flex-direction: column; gap: 10px; }
 .checklist li { display: grid; grid-template-columns: 22px 1fr; gap: 4px 10px; }
 .checklist .dot { width: 18px; height: 18px; border-radius: 50%; margin-top: 2px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 800; }
-.dot.ready { background: var(--ok); color: #052e16; }
+.dot.ready { background: var(--ok); color: #062a22; }
 .dot.error { background: var(--danger); color: #4c0519; }
 .dot.busy { border: 2px solid var(--accent); border-top-color: transparent; animation: spin 0.9s linear infinite; }
 .dot.idle { border: 2px solid var(--muted); }
@@ -73,7 +73,7 @@ summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 .users li { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
 .users li div { display: flex; gap: 8px; }
 .users button { padding: 6px 10px; font-size: 13px; }
-.logs { max-height: 320px; overflow: auto; background: var(--panel2); padding: 12px; border-radius: 10px; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: #b6c2dc; }
+.logs { max-height: 320px; overflow: auto; background: var(--panel2); padding: 12px; border-radius: 10px; font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; color: #bfd0d8; }
 .danger { border-color: rgba(251,113,133,.35); }
 .danger-btn { background: var(--danger); color: #3f0712; margin-top: 10px; }
 .footer { text-align: center; margin: 4px 0 30px; }
