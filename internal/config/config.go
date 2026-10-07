@@ -158,7 +158,11 @@ type Display struct {
 type Video struct {
 	// Encoder is one of auto, nvenc, amf, qsv, x264. "auto" probes the GPU
 	// encoders in that order with a one-frame test encode.
-	Encoder     string  `toml:"encoder"`
+	Encoder string `toml:"encoder"`
+	// Codec is auto, av1, h265 or h264. "auto" streams the most efficient
+	// codec that both this PC's encoder and the viewer's browser handle in
+	// hardware (AV1, then HEVC, then H.264).
+	Codec       string  `toml:"codec"`
 	FPS         int     `toml:"fps"`
 	BitrateKbps int     `toml:"bitrate_kbps"`
 	GOPSeconds  float64 `toml:"gop_seconds"`
@@ -235,7 +239,7 @@ func Default() Config {
 			VirtualDevice: "Virtual Display", MakePrimary: true, StartupTimeout: Duration{15 * time.Second},
 		},
 		Video: Video{
-			Encoder: "auto", FPS: 60, BitrateKbps: 15000, GOPSeconds: 2,
+			Encoder: "auto", Codec: "auto", FPS: 60, BitrateKbps: 15000, GOPSeconds: 2,
 			FFmpegBinary: "ffmpeg", ShowCursor: true, Profile: "high",
 		},
 		Audio:   Audio{Enabled: true, Backend: "wasapi", BitrateKbps: 128},
@@ -392,6 +396,11 @@ func (c *Config) Validate() error {
 
 	if !validEncoders[c.Video.Encoder] {
 		add("video.encoder must be auto, nvenc, amf, qsv or x264")
+	}
+	switch c.Video.Codec {
+	case "", "auto", "av1", "h265", "h264":
+	default:
+		add("video.codec must be auto, av1, h265 or h264")
 	}
 	if c.Video.FPS < 1 || c.Video.FPS > 240 {
 		add("video.fps must be 1..240")

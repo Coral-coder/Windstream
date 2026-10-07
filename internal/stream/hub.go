@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,9 @@ import (
 // Config is the hub configuration assembled by the serve command.
 type Config struct {
 	Video wsmedia.VideoConfig
+	// Codec forces a video codec (av1, h265, h264) when every viewer can
+	// decode it; "auto" or "" picks per viewer, most efficient first.
+	Codec string
 	// Source resolves the capture target before each pipeline start (DXGI
 	// indices can change when monitors are added or rearranged).
 	Source func() (wsmedia.Source, error)
@@ -53,6 +57,7 @@ type Stats struct {
 	AudioError string `json:"audio_error,omitempty"`
 	Clients    int    `json:"clients"`
 	Encoder    string `json:"encoder"`
+	Codec      string `json:"codec"`
 	Running    bool   `json:"running"`
 	Frames     uint64 `json:"frames"`
 	Keyframes  uint64 `json:"keyframes"`
@@ -67,23 +72,34 @@ type Hub struct {
 
 	api        *webrtc.API
 	iceServers []webrtc.ICEServer
-	video      *webrtc.TrackLocalStaticRTP
+	tracks     map[string]*webrtc.TrackLocalStaticRTP // one per codec
 	audio      *webrtc.TrackLocalStaticSample
 	udp        *net.UDPConn
 	tcp        net.Listener
 
 	mu         sync.Mutex
 	clients    map[*Client]struct{}
+	codec      string          // video codec being streamed ("" while idle)
+	lastPrefs  []string        // codec preferences of the newest viewer
+	broken     map[string]bool // codecs no encoder could capture with this session
 	encoder    string
-	candidates []string
 	lastErr    string
 	audioErr   string
 	pipeCancel context.CancelFunc
+	runCancel  context.CancelFunc // stops the current encoder run (codec switch)
 	pipeWG     sync.WaitGroup
 	stopTimer  *time.Timer
 
+	probeMu sync.Mutex // serializes encoder probing
+	availMu sync.Mutex
+	avail   map[string][]string // codec -> working vendors, in preference order
+
 	frames, keyframes, bytes atomic.Uint64
-	frameIsKey               bool
+	// pktMu guards per-packet state: a stopped pipeline's goroutine can
+	// deliver its last packets while a restarted one begins.
+	pktMu      sync.Mutex
+	frameIsKey bool
+	rewriter   *rtpRewriter
 }
 
 // NewHub prepares the WebRTC API, media tracks and ICE sockets. The capture
@@ -92,7 +108,9 @@ func NewHub(ctx context.Context, cfg Config, log *slog.Logger) (*Hub, error) {
 	if cfg.StopDelay == 0 {
 		cfg.StopDelay = 15 * time.Second
 	}
-	h := &Hub{cfg: cfg, log: log, ctx: ctx, clients: make(map[*Client]struct{})}
+	h := &Hub{cfg: cfg, log: log, ctx: ctx, clients: make(map[*Client]struct{}),
+		broken: map[string]bool{}, avail: map[string][]string{},
+		tracks: map[string]*webrtc.TrackLocalStaticRTP{}, rewriter: newRTPRewriter()}
 
 	se := webrtc.SettingEngine{}
 	udp, err := net.ListenUDP("udp", &net.UDPAddr{Port: cfg.WebRTC.UDPPort})
@@ -134,19 +152,32 @@ func NewHub(ctx context.Context, cfg Config, log *slog.Logger) (*Hub, error) {
 		h.closeSockets()
 		return nil, err
 	}
+	if err := me.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: playoutDelayURI}, webrtc.RTPCodecTypeVideo); err != nil {
+		h.closeSockets()
+		return nil, err
+	}
+	ir.Add(playoutDelayFactory{})
 	h.api = webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir))
 
-	h.video, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
-		MimeType:  webrtc.MimeTypeH264,
-		ClockRate: 90000,
+	// Video and audio deliberately use different stream IDs: browsers
+	// lip-sync tracks of the same stream by delaying whichever arrives
+	// first, which would hold every video frame back by the audio jitter
+	// buffer. For a game, late audio beats late video.
+	for codec, cap := range map[string]webrtc.RTPCodecCapability{
 		// Constrained Baseline is what every browser offers, so it is the
 		// signalled profile; WebRTC H.264 decoders in Chrome, Edge, Safari
 		// and Firefox decode Main/High bitstreams regardless.
-		SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
-	}, "video", "windstream")
-	if err != nil {
-		h.closeSockets()
-		return nil, err
+		wsmedia.CodecH264: {MimeType: webrtc.MimeTypeH264, ClockRate: 90000,
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"},
+		wsmedia.CodecH265: {MimeType: webrtc.MimeTypeH265, ClockRate: 90000},
+		wsmedia.CodecAV1:  {MimeType: webrtc.MimeTypeAV1, ClockRate: 90000},
+	} {
+		t, err := webrtc.NewTrackLocalStaticRTP(cap, "video", "windstream-video")
+		if err != nil {
+			h.closeSockets()
+			return nil, err
+		}
+		h.tracks[codec] = t
 	}
 	if cfg.AudioEnabled {
 		h.audio, err = webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{
@@ -154,7 +185,7 @@ func NewHub(ctx context.Context, cfg Config, log *slog.Logger) (*Hub, error) {
 			ClockRate:   48000,
 			Channels:    2,
 			SDPFmtpLine: "minptime=10;useinbandfec=1;stereo=1",
-		}, "audio", "windstream")
+		}, "audio", "windstream-audio")
 		if err != nil {
 			h.closeSockets()
 			return nil, err
@@ -200,7 +231,7 @@ func (h *Hub) Stats() Stats {
 	return Stats{
 		Error:      h.lastErr,
 		AudioError: h.audioErr,
-		Clients:    len(h.clients), Encoder: h.encoder, Running: h.pipeCancel != nil,
+		Clients:    len(h.clients), Encoder: h.encoder, Codec: h.codec, Running: h.pipeCancel != nil,
 		Frames: h.frames.Load(), Keyframes: h.keyframes.Load(), Bytes: h.bytes.Load(),
 	}
 }
@@ -222,9 +253,6 @@ func (h *Hub) addClient(c *Client) error {
 	if h.stopTimer != nil {
 		h.stopTimer.Stop()
 		h.stopTimer = nil
-	}
-	if h.pipeCancel == nil {
-		h.startPipelinesLocked()
 	}
 	return nil
 }
@@ -265,6 +293,10 @@ func (h *Hub) stopPipelinesLocked() {
 		h.pipeCancel()
 		h.pipeCancel = nil
 	}
+	// The next session negotiates from scratch (and retries any codec that
+	// failed this time: the display may simply have been asleep).
+	h.codec = ""
+	h.broken = map[string]bool{}
 }
 
 // recoverPipeline keeps a Go panic in a capture pipeline (e.g. a display or
@@ -302,30 +334,34 @@ func (h *Hub) runVideo(ctx context.Context) {
 		}
 		backoff = time.Second
 	}
-	h.mu.Lock()
-	candidates := h.candidates // probed once, reused across viewer sessions
-	h.mu.Unlock()
-	next := 0
+	next, lastCodec := 0, ""
 	for ctx.Err() == nil {
+		h.mu.Lock()
+		codec := h.codec
+		h.mu.Unlock()
+		if codec == "" {
+			return // pipelines are being stopped
+		}
+		if codec != lastCodec {
+			next, lastCodec = 0, codec
+		}
+		candidates := h.encodersFor(ctx, codec)
 		if next >= len(candidates) {
-			var failed map[string]error
-			candidates, failed = wsmedia.Candidates(ctx, h.cfg.Video)
-			h.mu.Lock()
-			h.candidates = candidates
-			h.mu.Unlock()
-			for enc, err := range failed {
-				h.log.Debug("encoder unavailable", "encoder", enc, "error", err)
+			// Every encoder for this codec failed on this capture path.
+			if h.codecFailed(codec) {
+				continue // viewers were moved to another codec
 			}
+			h.forgetEncoders(codec) // re-probe next round
 			next = 0
 			if len(candidates) == 0 {
-				h.log.Error("no working H.264 encoder found (check `windstream check`)")
-				if !h.sleep(ctx, &backoff) {
-					return
-				}
-				continue
+				h.log.Error("no working video encoder found (check `windstream check`)", "codec", codec)
 			}
+			if !h.sleep(ctx, &backoff) {
+				return
+			}
+			continue
 		}
-		enc := candidates[next]
+		vendor := candidates[next]
 		src, err := h.cfg.Source()
 		if err != nil {
 			h.log.Error("capture target unavailable", "error", err)
@@ -334,40 +370,256 @@ func (h *Hub) runVideo(ctx context.Context) {
 			}
 			continue
 		}
+		runCtx, cancel := context.WithCancel(ctx)
 		h.mu.Lock()
-		h.encoder = enc
+		if h.codec != codec { // switched while probing
+			h.mu.Unlock()
+			cancel()
+			continue
+		}
+		h.encoder = wsmedia.EncoderName(codec, vendor)
 		h.lastErr = ""
+		h.runCancel = cancel
 		h.mu.Unlock()
-		h.log.Info("starting video pipeline", "encoder", enc, "test_source", src.Test,
-			"adapter", src.Adapter, "output", src.Output, "fps", h.cfg.Video.FPS,
+		h.log.Info("starting video pipeline", "codec", codec, "encoder", wsmedia.EncoderName(codec, vendor),
+			"test_source", src.Test, "adapter", src.Adapter, "output", src.Output, "fps", h.cfg.Video.FPS,
 			"bitrate_kbps", h.cfg.Video.BitrateKbps)
 		start := time.Now()
 		before := h.frames.Load()
-		err = wsmedia.RunVideo(ctx, h.cfg.Video, enc, src, h.log, h.onVideoPacket)
+		track := h.tracks[codec]
+		h.pktMu.Lock()
+		h.frameIsKey = false
+		h.rewriter.restart()
+		h.pktMu.Unlock()
+		err = wsmedia.RunVideo(runCtx, h.cfg.Video, codec, vendor, src, h.log, func(p wsmedia.VideoPacket) {
+			h.onVideoPacket(track, p)
+		})
+		cancel()
+		h.mu.Lock()
+		h.runCancel = nil
+		switched := h.codec != codec
+		h.mu.Unlock()
 		if ctx.Err() != nil {
 			return
 		}
+		if switched {
+			h.log.Info("video codec changed; restarting encoder", "from", codec)
+			continue
+		}
 		produced := h.frames.Load() > before
-		h.log.Error("video pipeline stopped", "encoder", enc, "error", err, "uptime", time.Since(start).Round(time.Millisecond))
+		h.log.Error("video pipeline stopped", "encoder", wsmedia.EncoderName(codec, vendor), "error", err,
+			"uptime", time.Since(start).Round(time.Millisecond))
 		if !produced {
 			// This encoder cannot handle this capture path (e.g. the output
 			// is on a different GPU vendor); fall through to the next one.
 			next++
 			if next < len(candidates) {
-				h.log.Warn("trying next encoder", "encoder", candidates[next])
+				h.log.Warn("trying next encoder", "encoder", wsmedia.EncoderName(codec, candidates[next]))
 				continue
 			}
-			// Every candidate failed on this capture path: re-probe next round.
-			h.mu.Lock()
-			h.candidates = nil
-			h.mu.Unlock()
-		} else {
-			backoff = time.Second
+			continue // exhausted: handled at the top of the loop
 		}
+		backoff = time.Second
 		if !h.sleep(ctx, &backoff) {
 			return
 		}
 	}
+}
+
+// encodersFor returns the vendors that can encode codec here, probing them
+// once (the result is cached for the life of the hub).
+func (h *Hub) encodersFor(ctx context.Context, codec string) []string {
+	if codec == "" {
+		return nil
+	}
+	h.availMu.Lock()
+	v, ok := h.avail[codec]
+	h.availMu.Unlock()
+	if ok {
+		return v
+	}
+	h.probeMu.Lock()
+	defer h.probeMu.Unlock()
+	h.availMu.Lock()
+	v, ok = h.avail[codec]
+	h.availMu.Unlock()
+	if ok {
+		return v
+	}
+	v, failed := wsmedia.Candidates(ctx, h.cfg.Video, codec)
+	for vendor, err := range failed {
+		h.log.Debug("encoder unavailable", "codec", codec, "vendor", vendor, "error", err)
+	}
+	h.log.Info("video encoders probed", "codec", codec, "working", v)
+	// Do not cache an empty result: ffmpeg may still be downloading, or the
+	// probe was cancelled.
+	if len(v) > 0 && ctx.Err() == nil {
+		h.availMu.Lock()
+		h.avail[codec] = v
+		h.availMu.Unlock()
+	}
+	return v
+}
+
+func (h *Hub) forgetEncoders(codec string) {
+	h.availMu.Lock()
+	delete(h.avail, codec)
+	h.availMu.Unlock()
+}
+
+func (h *Hub) knownEncoders(codec string) []string {
+	h.availMu.Lock()
+	defer h.availMu.Unlock()
+	return h.avail[codec]
+}
+
+// probeCodecs probes every codec in prefs concurrently so the first viewer
+// does not wait for them one by one.
+func (h *Hub) probeCodecs(ctx context.Context, prefs []string) {
+	var wg sync.WaitGroup
+	for _, c := range prefs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.encodersFor(ctx, c)
+		}()
+	}
+	wg.Wait()
+}
+
+// ErrNoCodec means the viewer's browser cannot decode any codec this server
+// can encode.
+var ErrNoCodec = errors.New("no common video codec")
+
+// normalizeCodecs filters a browser's codec list to known codecs, without
+// duplicates. Old clients send nothing: they only ever handled H.264.
+func normalizeCodecs(prefs []string) []string {
+	var out []string
+	for _, c := range prefs {
+		if wsmedia.ValidCodec(c) && !slices.Contains(out, c) {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		out = []string{wsmedia.CodecH264}
+	}
+	return out
+}
+
+// attach chooses the video codec for a viewer, adds the matching video track
+// to its peer connection and starts the capture pipelines if needed.
+func (h *Hub) attach(c *Client, prefs []string) error {
+	prefs = normalizeCodecs(prefs)
+	h.probeCodecs(h.ctx, prefs)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.clients[c]; !ok {
+		return errors.New("client closed")
+	}
+	c.codecs = prefs
+	codec := h.codec
+	if codec == "" || !slices.Contains(prefs, codec) {
+		codec = h.pickLocked(prefs)
+	}
+	if codec == "" {
+		c.codecs = nil
+		return ErrNoCodec
+	}
+	sender, err := c.pc.AddTrack(h.tracks[codec])
+	if err != nil {
+		c.codecs = nil
+		return fmt.Errorf("add video track: %w", err)
+	}
+	c.videoSender = sender
+	go drainRTCP(sender)
+	h.lastPrefs = prefs
+	c.log.Info("video codec chosen", "codec", codec, "browser_supports", prefs)
+	if codec != h.codec {
+		h.switchCodecLocked(codec, c)
+	}
+	if h.pipeCancel == nil {
+		h.startPipelinesLocked()
+	}
+	return nil
+}
+
+// pickLocked returns the best codec that every attached viewer can decode
+// and this machine can encode: hardware encoders in the newest viewer's
+// order of preference, then software H.264, then any software encoder.
+func (h *Hub) pickLocked(prefs []string) string {
+	usable := func(codec string, hwOnly bool) bool {
+		if h.broken[codec] {
+			return false
+		}
+		for cl := range h.clients {
+			if cl.codecs != nil && !slices.Contains(cl.codecs, codec) {
+				return false
+			}
+		}
+		for _, v := range h.knownEncoders(codec) {
+			if !hwOnly || wsmedia.IsHardware(v) {
+				return true
+			}
+		}
+		return false
+	}
+	if f := h.cfg.Codec; wsmedia.ValidCodec(f) && slices.Contains(prefs, f) && usable(f, false) {
+		return f
+	}
+	for _, codec := range prefs {
+		if usable(codec, true) {
+			return codec
+		}
+	}
+	if slices.Contains(prefs, wsmedia.CodecH264) && usable(wsmedia.CodecH264, false) {
+		return wsmedia.CodecH264
+	}
+	for _, codec := range prefs {
+		if usable(codec, false) {
+			return codec
+		}
+	}
+	return ""
+}
+
+// switchCodecLocked moves every viewer (except skip, already set up) to
+// codec and restarts the encoder.
+func (h *Hub) switchCodecLocked(codec string, skip *Client) {
+	if h.codec != "" {
+		h.log.Info("switching video codec", "from", h.codec, "to", codec)
+	}
+	h.codec = codec
+	for cl := range h.clients {
+		if cl == skip || cl.videoSender == nil {
+			continue
+		}
+		if err := cl.videoSender.ReplaceTrack(h.tracks[codec]); err != nil {
+			cl.log.Warn("viewer cannot switch video codec; disconnecting it", "codec", codec, "error", err)
+			go cl.Close()
+		}
+	}
+	if h.runCancel != nil {
+		h.runCancel()
+	}
+}
+
+// codecFailed is called when no encoder could stream codec. It moves the
+// viewers to the next best codec and reports whether it did.
+func (h *Hub) codecFailed(codec string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.codec != codec {
+		return true // already switched
+	}
+	h.broken[codec] = true
+	next := h.pickLocked(h.lastPrefs)
+	if next == "" || next == codec {
+		delete(h.broken, codec)
+		return false
+	}
+	h.log.Warn("no encoder could stream this codec here; falling back", "codec", codec, "fallback", next)
+	h.switchCodecLocked(next, nil)
+	return true
 }
 
 func (h *Hub) sleep(ctx context.Context, backoff *time.Duration) bool {
@@ -382,8 +634,10 @@ func (h *Hub) sleep(ctx context.Context, backoff *time.Duration) bool {
 	return true
 }
 
-func (h *Hub) onVideoPacket(p wsmedia.VideoPacket) {
-	// Only the video goroutine calls this, so frameIsKey needs no lock.
+func (h *Hub) onVideoPacket(track *webrtc.TrackLocalStaticRTP, p wsmedia.VideoPacket) {
+	// Held across the write so sequence numbers go out in order.
+	h.pktMu.Lock()
+	defer h.pktMu.Unlock()
 	if p.Keyframe && !h.frameIsKey {
 		h.frameIsKey = true
 		if h.keyframes.Add(1) == 1 {
@@ -395,7 +649,8 @@ func (h *Hub) onVideoPacket(p wsmedia.VideoPacket) {
 		h.frameIsKey = false
 	}
 	h.bytes.Add(uint64(len(p.Packet.Payload)))
-	if err := h.video.WriteRTP(p.Packet); err != nil && !errors.Is(err, io.ErrClosedPipe) {
+	h.rewriter.rewrite(p.Packet)
+	if err := track.WriteRTP(p.Packet); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 		h.log.Debug("write video rtp", "error", err)
 	}
 }

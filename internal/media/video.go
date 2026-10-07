@@ -21,7 +21,7 @@ type VideoPacket struct {
 
 // RunVideo starts ffmpeg and calls onPacket for every RTP packet until the
 // context is cancelled or ffmpeg exits. It returns nil only on cancellation.
-func RunVideo(ctx context.Context, cfg VideoConfig, encoder string, src Source, log *slog.Logger, onPacket func(VideoPacket)) error {
+func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src Source, log *slog.Logger, onPacket func(VideoPacket)) error {
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		return fmt.Errorf("listen for encoder RTP: %w", err)
@@ -31,7 +31,7 @@ func RunVideo(ctx context.Context, cfg VideoConfig, encoder string, src Source, 
 	port := conn.LocalAddr().(*net.UDPAddr).Port
 	rtpURL := fmt.Sprintf("rtp://127.0.0.1:%d?pkt_size=1200", port)
 
-	args := BuildVideoArgs(cfg, encoder, src, rtpURL)
+	args := BuildVideoArgs(cfg, codec, vendor, src, rtpURL)
 	cmd := exec.CommandContext(ctx, cfg.FFmpeg, args...)
 	configureCmd(cmd)
 	cmd.Stdout = io.Discard // the rtp muxer prints an SDP we do not need
@@ -43,7 +43,7 @@ func RunVideo(ctx context.Context, cfg VideoConfig, encoder string, src Source, 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
-	go logStderr(stderr, log.With("pipeline", "video", "encoder", encoder))
+	go logStderr(stderr, log.With("pipeline", "video", "encoder", EncoderName(codec, vendor)))
 	exited := make(chan error, 1)
 	go func() {
 		exited <- cmd.Wait()
@@ -78,7 +78,7 @@ func RunVideo(ctx context.Context, cfg VideoConfig, encoder string, src Source, 
 		if err := pkt.Unmarshal(append([]byte(nil), buf[:n]...)); err != nil {
 			continue
 		}
-		onPacket(VideoPacket{Packet: pkt, Keyframe: IsKeyframeStart(pkt)})
+		onPacket(VideoPacket{Packet: pkt, Keyframe: IsKeyframeStart(codec, pkt)})
 	}
 	waitErr := <-exited
 	if ctx.Err() != nil {

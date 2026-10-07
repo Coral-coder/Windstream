@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -24,6 +25,11 @@ type SignalMessage struct {
 	Message    string                   `json:"message,omitempty"`
 	ICEServers []webrtc.ICEServer       `json:"iceServers,omitempty"`
 	Input      *InputCaps               `json:"input,omitempty"`
+	// Codecs (hello, client -> server) lists the video codecs the browser
+	// decodes, best first. Codec (config/offer, server -> client) names the
+	// codec being streamed.
+	Codecs []string `json:"codecs,omitempty"`
+	Codec  string   `json:"codec,omitempty"`
 }
 
 // InputCaps tells the client which device classes the server accepts.
@@ -45,16 +51,27 @@ type Client struct {
 	pc   *webrtc.PeerConnection
 	inj  input.Injector
 
-	limiter   *rate.Limiter
-	dropped   int
-	closeOnce sync.Once
-	done      chan struct{}
+	// codecs and videoSender are guarded by hub.mu.
+	codecs      []string
+	videoSender *webrtc.RTPSender
+
+	limiter    *rate.Limiter
+	dropped    int
+	startOnce  sync.Once
+	helloTimer atomic.Pointer[time.Timer]
+	closeOnce  sync.Once
+	done       chan struct{}
 }
 
-// Connect creates a peer connection for an authenticated user, sends the
-// initial offer through send and returns the client. The caller must forward
-// subsequent signaling messages to HandleSignal and call Close when the
-// signaling channel ends.
+// helloTimeout is how long the server waits for the browser to list its
+// codecs before assuming an old client that only handles H.264.
+const helloTimeout = 3 * time.Second
+
+// Connect creates a peer connection for an authenticated user and sends the
+// session config through send. The browser answers with a "hello" listing
+// the codecs it can decode, after which the server sends its offer. The
+// caller must forward subsequent signaling messages to HandleSignal and call
+// Close when the signaling channel ends.
 func (h *Hub) Connect(user, ip string, send func(SignalMessage) error) (*Client, error) {
 	idb := make([]byte, 6)
 	_, _ = rand.Read(idb)
@@ -95,12 +112,39 @@ func (h *Hub) Connect(user, ip string, send func(SignalMessage) error) (*Client,
 		c.Close()
 		return nil, err
 	}
-	if err := c.sendOffer(); err != nil {
-		c.Close()
-		return nil, err
-	}
+	c.helloTimer.Store(time.AfterFunc(helloTimeout, func() {
+		if err := c.start(nil); err != nil && !errors.Is(err, errStarted) {
+			c.log.Warn("starting stream failed", "error", err)
+			_ = c.send(SignalMessage{Type: "error", Message: startErrorMessage(err)})
+			c.Close()
+		}
+	}))
 	c.log.Info("client connected", "clients", h.ClientCount())
 	return c, nil
+}
+
+var errStarted = errors.New("stream already started")
+
+// start negotiates the video codec and sends the offer, once.
+func (c *Client) start(codecs []string) error {
+	err := errStarted
+	c.startOnce.Do(func() {
+		if t := c.helloTimer.Load(); t != nil {
+			t.Stop()
+		}
+		if err = c.hub.attach(c, codecs); err != nil {
+			return
+		}
+		err = c.sendOffer()
+	})
+	return err
+}
+
+func startErrorMessage(err error) string {
+	if errors.Is(err, ErrNoCodec) {
+		return "This browser cannot decode any video format this PC can encode. Use a current Chrome, Edge, Safari or Firefox."
+	}
+	return "Could not start the stream: " + err.Error()
 }
 
 func (c *Client) setupPeer() error {
@@ -110,11 +154,7 @@ func (c *Client) setupPeer() error {
 	}
 	c.pc = pc
 
-	vs, err := pc.AddTrack(c.hub.video)
-	if err != nil {
-		return fmt.Errorf("add video track: %w", err)
-	}
-	go drainRTCP(vs)
+	// The video track is added once the codec is known (see start).
 	if c.hub.audio != nil {
 		as, err := pc.AddTrack(c.hub.audio)
 		if err != nil {
@@ -172,7 +212,7 @@ func (c *Client) sendOffer() error {
 	if err := c.pc.SetLocalDescription(offer); err != nil {
 		return fmt.Errorf("set local description: %w", err)
 	}
-	return c.send(SignalMessage{Type: "offer", SDP: offer.SDP})
+	return c.send(SignalMessage{Type: "offer", SDP: offer.SDP, Codec: c.Codec()})
 }
 
 // HandleSignal processes a message from the client's signaling channel.
@@ -188,6 +228,11 @@ func (c *Client) HandleSignal(m SignalMessage) error {
 			return nil
 		}
 		return c.pc.AddICECandidate(*m.Candidate)
+	case "hello":
+		if err := c.start(m.Codecs); err != nil && !errors.Is(err, errStarted) {
+			return err
+		}
+		return nil
 	case "bye":
 		c.Close()
 		return nil
@@ -198,12 +243,22 @@ func (c *Client) HandleSignal(m SignalMessage) error {
 	}
 }
 
+// Codec returns the video codec this client is receiving.
+func (c *Client) Codec() string {
+	c.hub.mu.Lock()
+	defer c.hub.mu.Unlock()
+	return c.hub.codec
+}
+
 // Done is closed when the client has been torn down.
 func (c *Client) Done() <-chan struct{} { return c.done }
 
 // Close tears down the peer connection and virtual input devices.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
+		if t := c.helloTimer.Load(); t != nil {
+			t.Stop()
+		}
 		c.hub.removeClient(c)
 		if c.pc != nil {
 			_ = c.pc.Close()

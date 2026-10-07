@@ -174,6 +174,7 @@ type Settings struct {
 	FPS           int    `json:"fps"`
 	BitrateMbps   int    `json:"bitrate_mbps"`
 	Encoder       string `json:"encoder"`
+	Codec         string `json:"codec"`
 	DisplayMode   string `json:"display_mode"` // virtual | monitor
 	Monitor       string `json:"monitor"`
 	MakePrimary   bool   `json:"make_primary"`
@@ -192,7 +193,7 @@ func settingsFrom(cfg config.Config) Settings {
 	return Settings{
 		Resolution: fmt.Sprintf("%dx%d", cfg.Display.Width, cfg.Display.Height), Refresh: cfg.Display.Refresh,
 		FPS: cfg.Video.FPS, BitrateMbps: cfg.Video.BitrateKbps / 1000, Encoder: cfg.Video.Encoder,
-		DisplayMode: cfg.Display.Mode, Monitor: cfg.Display.Monitor, MakePrimary: cfg.Display.MakePrimary,
+		Codec: cfg.Video.Codec, DisplayMode: cfg.Display.Mode, Monitor: cfg.Display.Monitor, MakePrimary: cfg.Display.MakePrimary,
 		Audio: cfg.Audio.Enabled, Gamepads: cfg.Input.Gamepads, KeyboardMouse: cfg.Input.Keyboard && cfg.Input.Mouse,
 		LaunchSteam: len(cfg.Display.Launch) > 0 && strings.Contains(strings.ToLower(cfg.Display.Launch[0]), "steam"),
 		UPnP:        cfg.Network.UPnP, CustomDomain: cfg.Network.CustomDomain, MaxClients: cfg.Server.MaxClients,
@@ -497,6 +498,9 @@ func (p *panel) handleSettings(w http.ResponseWriter, r *http.Request) {
 	err := p.c.update(func(c *config.Config) error {
 		c.Display.Width, c.Display.Height, c.Display.Refresh = width, height, s.Refresh
 		c.Video.FPS, c.Video.BitrateKbps, c.Video.Encoder = s.FPS, s.BitrateMbps*1000, s.Encoder
+		if s.Codec != "" {
+			c.Video.Codec = s.Codec
+		}
 		if !p.c.opts.Dev {
 			c.Display.Mode = s.DisplayMode
 		}

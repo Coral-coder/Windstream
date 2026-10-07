@@ -76,3 +76,20 @@ func TestRequireTOTP(t *testing.T) {
 		t.Fatalf("expected totp error, got %v", err)
 	}
 }
+
+func TestVideoCodec(t *testing.T) {
+	cfg, err := Parse([]byte(minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Video.Codec != "auto" {
+		t.Errorf("default codec %q, want auto", cfg.Video.Codec)
+	}
+	if _, err := Parse([]byte(minimal + "\n[video]\ncodec = \"av1\"\n")); err != nil {
+		t.Errorf("av1 rejected: %v", err)
+	}
+	_, err = Parse([]byte(minimal + "\n[video]\ncodec = \"vp8\"\n"))
+	if err == nil || !strings.Contains(err.Error(), "video.codec") {
+		t.Errorf("vp8 accepted: %v", err)
+	}
+}

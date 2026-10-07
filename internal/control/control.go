@@ -496,6 +496,7 @@ func HubConfig(cfg *config.Config, disp *display.Manager, ffmpeg string, webrtcC
 		},
 		Audio: media.AudioConfig{FFmpeg: ffmpeg, Backend: cfg.Audio.Backend,
 			Device: cfg.Audio.Device, BitrateKbps: cfg.Audio.BitrateKbps},
+		Codec:        cfg.Video.Codec,
 		AudioEnabled: cfg.Audio.Enabled,
 		WebRTC:       webrtcCfg,
 		Input: input.Options{Gamepads: cfg.Input.Gamepads, Keyboard: cfg.Input.Keyboard,

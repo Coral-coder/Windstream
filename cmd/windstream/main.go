@@ -274,15 +274,27 @@ func cmdCheck(args []string) error {
 			out, _ := exec.CommandContext(ctx, cfg.Video.FFmpegBinary, "-hide_banner", "-filters").Output()
 			report(strings.Contains(string(out), " ddagrab "), "ddagrab capture", "Desktop Duplication filter (ffmpeg 6.0+)")
 		}
-		cands, failed := media.Candidates(ctx, media.VideoConfig{FFmpeg: cfg.Video.FFmpegBinary, Encoder: cfg.Video.Encoder})
-		report(len(cands) > 0, "video encoders", strings.Join(cands, ", "))
-		for _, e := range media.EncoderOrder {
-			if err, bad := failed[e]; bad && cfg.Video.Encoder == "auto" {
-				fmt.Printf("       %-6s unavailable: %s\n", e, firstLine(err.Error()))
+		vc := media.VideoConfig{FFmpeg: cfg.Video.FFmpegBinary, Encoder: cfg.Video.Encoder}
+		hardware := false
+		for _, codec := range media.Codecs {
+			cands, failed := media.Candidates(ctx, vc, codec)
+			var names []string
+			for _, v := range cands {
+				names = append(names, media.EncoderName(codec, v))
+				hardware = hardware || media.IsHardware(v)
+			}
+			if len(names) == 0 {
+				names = []string{"none"}
+			}
+			report(len(cands) > 0 || codec != media.CodecH264, codec+" encoders", strings.Join(names, ", "))
+			for _, e := range media.EncoderOrder {
+				if err, bad := failed[e]; bad && cfg.Video.Encoder == "auto" {
+					fmt.Printf("       %-6s unavailable: %s\n", e, firstLine(err.Error()))
+				}
 			}
 		}
-		if len(cands) > 0 && cands[0] == "x264" {
-			warn("hardware encoding", "no GPU encoder works; software x264 costs a lot of CPU and latency")
+		if !hardware {
+			warn("hardware encoding", "no GPU encoder works; software encoding costs a lot of CPU and latency")
 		}
 	}
 

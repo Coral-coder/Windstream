@@ -172,8 +172,13 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := client.HandleSignal(m); err != nil {
 			s.log.Warn("signaling error", "type", m.Type, "error", err)
+			if m.Type == "hello" {
+				_ = send(stream.SignalMessage{Type: "error", Message: helloErrorMessage(err)})
+				conn.Close(websocket.StatusUnsupportedData, "negotiation failed")
+				return
+			}
 			if m.Type == "answer" {
-				// A rejected answer (typically: browser lacks an H.264 decoder)
+				// A rejected answer (the browser cannot decode the codec)
 				// cannot recover by retrying, so tell the client and stop.
 				_ = send(stream.SignalMessage{Type: "error", Message: friendlySignalError(err)})
 				conn.Close(websocket.StatusUnsupportedData, "negotiation failed")
@@ -184,9 +189,16 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func helloErrorMessage(err error) string {
+	if errors.Is(err, stream.ErrNoCodec) {
+		return "This browser cannot decode any video format this PC can encode (AV1, HEVC or H.264). Use a current Chrome, Edge, Safari or Firefox."
+	}
+	return "Could not start the stream: " + err.Error()
+}
+
 func friendlySignalError(err error) string {
 	if strings.Contains(err.Error(), "codec is not supported") {
-		return "This browser cannot decode H.264 video over WebRTC. Use Chrome, Edge, Safari or Firefox with the OpenH264 plugin."
+		return "This browser cannot decode the video format being streamed. Use a current Chrome, Edge, Safari or Firefox."
 	}
 	return "Media negotiation failed: " + err.Error()
 }

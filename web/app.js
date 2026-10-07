@@ -7,7 +7,7 @@ const MSG = { GAMEPAD_STATE: 0x01, GAMEPAD_CONNECT: 0x02, GAMEPAD_DISCONNECT: 0x
 
 const ui = {
   login: $('#login'), form: $('#login-form'), loginBtn: $('#login-btn'), loginError: $('#login-error'),
-  totpRow: $('#totp-row'), stream: $('#stream'), stage: $('#stage'), video: $('#video'),
+  totpRow: $('#totp-row'), stream: $('#stream'), stage: $('#stage'), video: $('#video'), audio: $('#audio'),
   status: $('#status'), stats: $('#stats'), pads: $('#pads'),
 };
 
@@ -15,6 +15,7 @@ const state = {
   ws: null, pc: null, control: null, motion: null, caps: null,
   reconnectDelay: 1000, active: false, held: new Set(), pads: new Map(),
   rtt: null, lastStats: null, lastHeartbeat: 0, showStats: false, pointerLocked: false, fatalError: null,
+  codec: null, padTimer: null,
 };
 
 const enc = new TextEncoder();
@@ -46,6 +47,31 @@ function sendMotion(buf) {
   const ch = (state.motion && state.motion.readyState === 'open') ? state.motion : state.control;
   if (ch && ch.readyState === 'open' && ch.bufferedAmount < 16384) ch.send(buf);
 }
+
+// ---------- video codecs ----------
+// The server streams AV1, HEVC or H.264. Prefer whatever this device decodes
+// in hardware (fast, low latency, low power), most efficient first; then
+// software decoders, cheapest first. ?codec=h264 forces one for testing.
+const CODEC_MIME = { av1: 'video/AV1', h265: 'video/H265', h264: 'video/H264' };
+async function detectCodecs() {
+  const forced = new URLSearchParams(location.search).get('codec');
+  if (forced && CODEC_MIME[forced]) return [forced];
+  let caps = [];
+  try { caps = (RTCRtpReceiver.getCapabilities('video') || {}).codecs || []; } catch { /* old browser */ }
+  if (!caps.length) return ['h264'];
+  const decodable = Object.keys(CODEC_MIME).filter((k) => caps.some((c) => c.mimeType.toLowerCase() === CODEC_MIME[k].toLowerCase()));
+  const hw = {};
+  await Promise.all(decodable.map(async (k) => {
+    try {
+      const info = await navigator.mediaCapabilities.decodingInfo({ type: 'webrtc',
+        video: { contentType: CODEC_MIME[k], width: 1920, height: 1080, bitrate: 20e6, framerate: 60 } });
+      hw[k] = !!(info.supported && info.powerEfficient);
+    } catch { hw[k] = false; }
+  }));
+  return [...['av1', 'h265', 'h264'].filter((k) => decodable.includes(k) && hw[k]),
+    ...['h264', 'av1', 'h265'].filter((k) => decodable.includes(k) && !hw[k])];
+}
+const codecsReady = detectCodecs().catch(() => ['h264']);
 
 // ---------- login ----------
 ui.form.addEventListener('submit', async (ev) => {
@@ -99,6 +125,10 @@ function connect() {
   setStatus('Connecting…');
   const ws = new WebSocket(`wss://${location.host}/api/signal`);
   state.ws = ws;
+  ws.onopen = async () => {
+    const codecs = await codecsReady;
+    if (state.ws === ws) signal({ type: 'hello', codecs });
+  };
   ws.onmessage = async (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
@@ -137,6 +167,7 @@ async function handleSignal(msg) {
       break;
     }
     case 'offer': {
+      if (msg.codec) state.codec = msg.codec;
       if (!state.pc) createPeer([]);
       await state.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
       const answer = await state.pc.createAnswer();
@@ -167,12 +198,13 @@ function createPeer(iceServers) {
   teardownPeer();
   const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
   state.pc = pc;
-  const stream = new MediaStream();
+  // Audio plays from its own element and stream so the browser never delays
+  // video frames to lip-sync them with the (more buffered) audio.
   pc.ontrack = (ev) => {
-    stream.addTrack(ev.track);
-    ui.video.srcObject = stream;
     minimizeBuffering(ev.receiver);
-    ui.video.play().catch(() => {});
+    const el = ev.track.kind === 'audio' ? ui.audio : ui.video;
+    el.srcObject = new MediaStream([ev.track]);
+    el.play().catch(() => {});
   };
   pc.onicecandidate = (ev) => { if (ev.candidate) signal({ type: 'candidate', candidate: ev.candidate.toJSON() }); };
   pc.ondatachannel = (ev) => {
@@ -208,7 +240,7 @@ function onChannelMessage(data) {
 function teardownPeer() {
   if (state.pc) { try { state.pc.close(); } catch { /* ignore */ } }
   state.pc = null; state.control = null; state.motion = null;
-  ui.video.srcObject = null;
+  ui.video.srcObject = null; ui.audio.srcObject = null;
 }
 
 function teardown() {
@@ -267,6 +299,7 @@ function updatePadBadge() {
 }
 
 window.addEventListener('gamepadconnected', (ev) => {
+  startPadPolling();
   const gp = ev.gamepad;
   const max = state.caps ? state.caps.maxGamepads : 4;
   const slot = slotFor(gp);
@@ -287,8 +320,13 @@ window.addEventListener('gamepaddisconnected', (ev) => {
   updatePadBadge();
 });
 
+// Poll every 4 ms (browsers sample controllers at up to 250 Hz) instead of
+// once per animation frame, which would add up to a frame of input lag.
+function startPadPolling() {
+  if (!state.padTimer) state.padTimer = setInterval(() => pollPads(performance.now()), 4);
+}
+
 function pollPads(now) {
-  requestAnimationFrame(pollPads);
   if (!state.control || state.control.readyState !== 'open') return;
   const heartbeat = now - state.lastHeartbeat > 100;
   if (heartbeat) state.lastHeartbeat = now;
@@ -303,7 +341,6 @@ function pollPads(now) {
     }
   }
 }
-requestAnimationFrame(pollPads);
 
 // ---------- keyboard ----------
 const PASSTHROUGH_KEYS = new Set(['F11']);
@@ -344,23 +381,20 @@ document.addEventListener('pointerlockchange', () => {
 });
 ui.stage.classList.add('show-cursor');
 
-let accX = 0, accY = 0, moveScheduled = false;
-ui.stage.addEventListener('mousemove', (ev) => {
+// Mouse motion is sent the moment it happens. pointerrawupdate (Chrome,
+// Edge) delivers raw movement at the mouse's polling rate without waiting for
+// the next animation frame; other browsers fall back to mousemove.
+const RAW_POINTER = 'onpointerrawupdate' in window;
+function sendMove(ev) {
   if (!state.pointerLocked) return;
-  accX += ev.movementX; accY += ev.movementY;
-  if (!moveScheduled) {
-    moveScheduled = true;
-    requestAnimationFrame(() => {
-      moveScheduled = false;
-      const dx = Math.max(-32768, Math.min(32767, accX)), dy = Math.max(-32768, Math.min(32767, accY));
-      accX = 0; accY = 0;
-      if (dx === 0 && dy === 0) return;
-      const dv = new DataView(new ArrayBuffer(5));
-      dv.setUint8(0, MSG.MOUSE_MOVE); dv.setInt16(1, dx, true); dv.setInt16(3, dy, true);
-      sendMotion(dv.buffer);
-    });
-  }
-});
+  const dx = Math.max(-32768, Math.min(32767, Math.round(ev.movementX)));
+  const dy = Math.max(-32768, Math.min(32767, Math.round(ev.movementY)));
+  if (dx === 0 && dy === 0) return;
+  const dv = new DataView(new ArrayBuffer(5));
+  dv.setUint8(0, MSG.MOUSE_MOVE); dv.setInt16(1, dx, true); dv.setInt16(3, dy, true);
+  sendMotion(dv.buffer);
+}
+ui.stage.addEventListener(RAW_POINTER ? 'pointerrawupdate' : 'mousemove', sendMove);
 function mouseButton(ev, down) {
   if (!state.pointerLocked) return;
   ev.preventDefault();
@@ -385,9 +419,9 @@ $('#btn-fullscreen').addEventListener('click', () => {
   else ui.stream.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});
 });
 $('#btn-mute').addEventListener('click', (ev) => {
-  ui.video.muted = !ui.video.muted;
-  ev.currentTarget.textContent = ui.video.muted ? '🔇' : '🔊';
-  ui.video.play().catch(() => {});
+  ui.audio.muted = !ui.audio.muted;
+  ev.currentTarget.textContent = ui.audio.muted ? '🔇' : '🔊';
+  ui.audio.play().catch(() => {});
 });
 $('#btn-stats').addEventListener('click', () => {
   state.showStats = !state.showStats;
@@ -414,11 +448,16 @@ setInterval(async () => {
     if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') pair = s;
   });
   const prev = state.lastStats;
-  state.lastStats = video ? { t: performance.now(), bytes: video.bytesReceived, frames: video.framesDecoded } : null;
+  state.lastStats = video ? { t: performance.now(), bytes: video.bytesReceived, frames: video.framesDecoded,
+    decode: video.totalDecodeTime || 0, processing: video.totalProcessingDelay || 0 } : null;
   const lines = [];
   if (video && prev) {
     const dt = (performance.now() - prev.t) / 1000;
-    lines.push(`video   ${video.frameWidth || 0}x${video.frameHeight || 0} ${((video.framesDecoded - prev.frames) / dt).toFixed(0)} fps`);
+    const codec = video.codecId && report.get(video.codecId);
+    const df = video.framesDecoded - prev.frames;
+    lines.push(`video   ${video.frameWidth || 0}x${video.frameHeight || 0} ${(df / dt).toFixed(0)} fps`);
+    lines.push(`codec   ${codec ? codec.mimeType.replace('video/', '') : state.codec || '?'} ${video.powerEfficientDecoder ? '(hw decode)' : '(sw decode)'}`);
+    if (df > 0) lines.push(`decode  ${(((video.totalDecodeTime || 0) - prev.decode) / df * 1000).toFixed(1)} ms  recv→decoded ${(((video.totalProcessingDelay || 0) - prev.processing) / df * 1000).toFixed(1)} ms`);
     lines.push(`bitrate ${(((video.bytesReceived - prev.bytes) * 8) / dt / 1e6).toFixed(1)} Mbps`);
     lines.push(`loss    ${video.packetsLost || 0} pkts  nack ${video.nackCount || 0}  pli ${video.pliCount || 0}`);
     if (video.jitterBufferEmittedCount) lines.push(`jitter  ${((video.jitterBufferDelay / video.jitterBufferEmittedCount) * 1000).toFixed(0)} ms buffer`);

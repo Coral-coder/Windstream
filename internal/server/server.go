@@ -265,7 +265,9 @@ func (s *Server) staticHandler() http.Handler {
 		if path == "index.html" {
 			w.Header().Set("Cache-Control", "no-store")
 		} else {
-			w.Header().Set("Cache-Control", "public, max-age=3600")
+			// Revalidate every load so an upgraded server never runs
+			// against a stale cached client script.
+			w.Header().Set("Cache-Control", "no-cache")
 		}
 		http.ServeContent(w, r, path, started, bytes.NewReader(data))
 	})

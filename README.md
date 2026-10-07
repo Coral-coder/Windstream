@@ -54,8 +54,13 @@ below.
   desktop layout comes back.
 - **Streams with low latency.** Desktop Duplication capture feeds the GPU
   encoder (NVENC, AMF or Quick Sync) with no copy through system memory.
-  Frames go out over WebRTC as soon as they are encoded, and audio is sent
-  as 10 ms Opus frames.
+  Each viewer gets the most efficient codec that both your GPU encodes and
+  their device decodes in hardware: AV1, then HEVC, then H.264. Frames go
+  out over WebRTC as soon as they are encoded. Chrome and Edge are told to
+  show each frame the moment it is decoded, with no smoothing buffer.
+  Audio is sent as 10 ms Opus frames on its own stream, so the video is
+  never held back to lip-sync with it. Mouse movement and controller state
+  are sent as soon as they change, not once per screen refresh.
 - **Supports controllers.** Pair a Bluetooth or USB controller with the
   device you play on. Each one appears on the PC as an Xbox 360 controller.
   Keyboard and mouse work too.

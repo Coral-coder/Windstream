@@ -8,33 +8,44 @@ import (
 func TestBuildVideoArgsDesktop(t *testing.T) {
 	cfg := VideoConfig{Width: 1920, Height: 1080, FPS: 60, BitrateKbps: 15000, GOPFrames: 120, ShowCursor: true}
 	src := Source{Adapter: 1, Output: 2}
-	for _, enc := range EncoderOrder {
-		args := BuildVideoArgs(cfg, enc, src, "rtp://127.0.0.1:5004?pkt_size=1200")
-		j := strings.Join(args, " ")
-		for _, want := range []string{
-			"-init_hw_device d3d11va=ws:1", "-filter_hw_device ws",
-			"ddagrab=output_idx=2:framerate=60:draw_mouse=1",
-			"-c:v " + encoderCodec[enc], "-g 120", "-bf 0", "-b:v 15000k",
-			"-f rtp -payload_type 96 rtp://127.0.0.1:5004?pkt_size=1200",
-		} {
-			if !strings.Contains(j, want) {
-				t.Errorf("%s: missing %q in: %s", enc, want, j)
+	for _, codec := range Codecs {
+		for _, enc := range EncoderOrder {
+			name := EncoderName(codec, enc)
+			if name == "" {
+				continue
+			}
+			args := BuildVideoArgs(cfg, codec, enc, src, "rtp://127.0.0.1:5004?pkt_size=1200")
+			j := strings.Join(args, " ")
+			for _, want := range []string{
+				"-init_hw_device d3d11va=ws:1", "-filter_hw_device ws",
+				"ddagrab=output_idx=2:framerate=60:draw_mouse=1",
+				"-c:v " + name, "-g 120", "-bf 0", "-b:v 15000k",
+				"-f rtp -payload_type 96 rtp://127.0.0.1:5004?pkt_size=1200",
+			} {
+				if !strings.Contains(j, want) {
+					t.Errorf("%s: missing %q in: %s", name, want, j)
+				}
+			}
+			if strings.Contains(j, "hwdownload") == IsHardware(enc) {
+				t.Errorf("%s: only software encoders may download frames: %s", name, j)
+			}
+			hasProfile := strings.Contains(j, "-profile:v")
+			if (codec == CodecAV1) == hasProfile {
+				t.Errorf("%s: profile flag wrong: %s", name, j)
 			}
 		}
 	}
-	x264 := strings.Join(BuildVideoArgs(cfg, "x264", src, "rtp://x"), " ")
-	if !strings.Contains(x264, "hwdownload,format=bgra") {
-		t.Errorf("x264 must download frames from the GPU: %s", x264)
+	if j := strings.Join(BuildVideoArgs(cfg, CodecH264, "nvenc", src, "rtp://x"), " "); !strings.Contains(j, "-profile:v high") || !strings.Contains(j, "-bufsize 500k") {
+		t.Errorf("h264 nvenc args: %s", j)
 	}
-	nv := strings.Join(BuildVideoArgs(cfg, "nvenc", src, "rtp://x"), " ")
-	if strings.Contains(nv, "hwdownload") {
-		t.Errorf("nvenc must stay zero-copy: %s", nv)
+	if j := strings.Join(BuildVideoArgs(cfg, CodecH265, "amf", src, "rtp://x"), " "); !strings.Contains(j, "-profile:v main") || !strings.Contains(j, "-header_insertion_mode idr") {
+		t.Errorf("hevc amf args: %s", j)
 	}
 }
 
 func TestBuildVideoArgsTest(t *testing.T) {
 	cfg := VideoConfig{Width: 640, Height: 360, FPS: 30, BitrateKbps: 2000, GOPFrames: 30}
-	j := strings.Join(BuildVideoArgs(cfg, "x264", Source{Test: true}, "rtp://x"), " ")
+	j := strings.Join(BuildVideoArgs(cfg, CodecH264, "x264", Source{Test: true}, "rtp://x"), " ")
 	if !strings.Contains(j, "testsrc2=size=640x360:rate=30") || strings.Contains(j, "ddagrab") {
 		t.Errorf("test source args wrong: %s", j)
 	}

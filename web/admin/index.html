@@ -98,6 +98,8 @@
       <label>Quality (bitrate) <span class="range"><input name="bitrate_mbps" type="range" min="5" max="80" step="1"><output id="bitrate-out"></output></span></label>
       <label>Encoder
         <select name="encoder"><option value="auto">Automatic (GPU)</option><option value="nvenc">NVIDIA NVENC</option><option value="amf">AMD AMF</option><option value="qsv">Intel Quick Sync</option><option value="x264">Software (CPU)</option></select></label>
+      <label>Video codec
+        <select name="codec"><option value="auto">Automatic (best the viewer's device decodes in hardware)</option><option value="av1">AV1 (most efficient; RTX 40/RX 7000/Arc encoders)</option><option value="h265">HEVC / H.265</option><option value="h264">H.264 (most compatible)</option></select></label>
       <label>Screen
         <select name="display_mode"><option value="virtual">Virtual screen (no monitor needed)</option><option value="monitor">A real monitor</option></select></label>
       <label id="monitor-row">Monitor <select name="monitor"></select></label>

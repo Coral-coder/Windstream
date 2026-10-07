@@ -85,7 +85,7 @@ form.addEventListener('submit', (ev) => {
   submitting(form, async (fd) => {
     const s = {
       resolution: fd.get('resolution'), fps: +fd.get('fps'), refresh: Math.max(60, +fd.get('fps')),
-      bitrate_mbps: +fd.get('bitrate_mbps'), encoder: fd.get('encoder'),
+      bitrate_mbps: +fd.get('bitrate_mbps'), encoder: fd.get('encoder'), codec: fd.get('codec'),
       display_mode: fd.get('display_mode'), monitor: fd.get('monitor') || '0',
       make_primary: !!fd.get('make_primary'), audio: !!fd.get('audio'), gamepads: !!fd.get('gamepads'),
       keyboard_mouse: !!fd.get('keyboard_mouse'), launch_steam: !!fd.get('launch_steam'),
@@ -112,6 +112,7 @@ function fillSettings(s) {
   form.fps.value = String(s.fps);
   form.bitrate_mbps.value = s.bitrate_mbps;
   form.encoder.value = s.encoder;
+  form.codec.value = s.codec || 'auto';
   form.display_mode.value = s.display_mode === 'monitor' ? 'monitor' : 'virtual';
   for (const k of ['make_primary', 'audio', 'gamepads', 'keyboard_mouse', 'launch_steam', 'upnp']) form[k].checked = !!s[k];
   form.custom_domain.value = s.custom_domain || '';

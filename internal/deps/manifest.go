@@ -13,7 +13,8 @@ type Artifact struct {
 
 var (
 	// FFmpeg is the gyan.dev "essentials" static build. It includes ddagrab,
-	// h264_nvenc, h264_amf, h264_qsv, libx264 and libopus.
+	// the NVENC/AMF/Quick Sync AV1, HEVC and H.264 encoders, libx264 and
+	// libopus.
 	FFmpeg = Artifact{
 		Name:   "ffmpeg 9.0.2",
 		URL:    "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip",

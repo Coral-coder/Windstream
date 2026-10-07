@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,20 +20,52 @@ import (
 	"github.com/coral-coder/windstream/internal/protocol"
 )
 
-// TestHubEndToEnd stands a pion peer in for the browser: it answers the hub's
-// offer over loopback ICE, checks that H.264 RTP arrives from a live ffmpeg
-// pipeline (synthetic source), and round-trips a ping over the input channel.
-func TestHubEndToEnd(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
+// testFFmpeg returns $WINDSTREAM_TEST_FFMPEG or ffmpeg from PATH.
+func testFFmpeg(t *testing.T) string {
+	t.Helper()
+	ff := os.Getenv("WINDSTREAM_TEST_FFMPEG")
+	if ff == "" {
+		ff = "ffmpeg"
+	}
+	if _, err := exec.LookPath(ff); err != nil {
 		t.Skip("ffmpeg not installed")
 	}
+	return ff
+}
+
+func TestHubEndToEnd(t *testing.T) {
+	t.Run("h264", func(t *testing.T) {
+		runHubEndToEnd(t, nil, webrtc.MimeTypeH264, "libx264")
+	})
+	t.Run("av1", func(t *testing.T) {
+		ff := testFFmpeg(t)
+		out, _ := exec.Command(ff, "-version").Output()
+		if !regexp.MustCompile(`ffmpeg version n?([89]|\d\d)\.`).Match(out) {
+			t.Skip("needs ffmpeg 8+ for AV1 RTP (set WINDSTREAM_TEST_FFMPEG)")
+		}
+		// A browser that only decodes AV1 (like Playwright's Chromium,
+		// which has no H.264) gets software AV1.
+		runHubEndToEnd(t, []string{"av1"}, webrtc.MimeTypeAV1, "libsvtav1")
+	})
+	t.Run("prefers hardware-free h264 over software av1", func(t *testing.T) {
+		runHubEndToEnd(t, []string{"av1", "h264"}, webrtc.MimeTypeH264, "libx264")
+	})
+}
+
+// runHubEndToEnd stands a pion peer in for the browser: it says hello with
+// codecs, answers the hub's offer over loopback ICE, checks that RTP of the
+// expected codec arrives from a live ffmpeg pipeline (synthetic source) with
+// the zero playout-delay extension, and round-trips a ping over the input
+// channel.
+func runHubEndToEnd(t *testing.T, codecs []string, wantMime, wantEncoder string) {
+	ff := testFFmpeg(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	hub, err := NewHub(ctx, Config{
-		Video: wsmedia.VideoConfig{FFmpeg: "ffmpeg", Width: 640, Height: 360, FPS: 30,
-			BitrateKbps: 1500, GOPFrames: 30, Encoder: "x264", Preset: "ultrafast"},
+		Video: wsmedia.VideoConfig{FFmpeg: ff, Width: 640, Height: 360, FPS: 30,
+			BitrateKbps: 1500, GOPFrames: 30, Encoder: "x264"},
 		Source:       func() (wsmedia.Source, error) { return wsmedia.Source{Test: true}, nil },
 		AudioEnabled: false,
 		WebRTC:       config.WebRTC{UDPPort: 0, IncludeLoopback: true},
@@ -46,21 +79,41 @@ func TestHubEndToEnd(t *testing.T) {
 	}
 	defer hub.Close()
 
-	// "Browser" side.
-	browser, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	// "Browser" side, which (like Chrome) understands playout-delay.
+	me := &webrtc.MediaEngine{}
+	if err := me.RegisterDefaultCodecs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := me.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: playoutDelayURI}, webrtc.RTPCodecTypeVideo); err != nil {
+		t.Fatal(err)
+	}
+	browser, err := webrtc.NewAPI(webrtc.WithMediaEngine(me)).NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer browser.Close()
-	var packets atomic.Int32
+	var packets, delayed atomic.Int32
 	gotVideo := make(chan struct{}, 1)
-	browser.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		if tr.Codec().MimeType != webrtc.MimeTypeH264 {
-			t.Errorf("unexpected codec %s", tr.Codec().MimeType)
+	browser.OnTrack(func(tr *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) {
+		if tr.Codec().MimeType != wantMime {
+			t.Errorf("codec %s, want %s", tr.Codec().MimeType, wantMime)
+		}
+		if tr.StreamID() != "windstream-video" {
+			t.Errorf("video stream id %q: must differ from audio so browsers do not lip-sync", tr.StreamID())
+		}
+		var extID uint8
+		for _, e := range rcv.GetParameters().HeaderExtensions {
+			if e.URI == playoutDelayURI {
+				extID = uint8(e.ID)
+			}
 		}
 		for {
-			if _, _, err := tr.ReadRTP(); err != nil {
+			p, _, err := tr.ReadRTP()
+			if err != nil {
 				return
+			}
+			if ext := p.GetExtension(extID); extID != 0 && len(ext) == 3 && ext[0] == 0 && ext[1] == 0 && ext[2] == 0 {
+				delayed.Add(1)
 			}
 			if packets.Add(1) == 60 {
 				gotVideo <- struct{}{}
@@ -150,6 +203,11 @@ func TestHubEndToEnd(t *testing.T) {
 	client = c
 	mu.Unlock()
 	defer c.Close()
+	if codecs != nil {
+		if err := c.HandleSignal(SignalMessage{Type: "hello", Codecs: codecs}); err != nil {
+			t.Fatal(err)
+		}
+	} // else: an old client; the hub falls back to H.264 after helloTimeout
 
 	if _, err := hub.Connect("second", "127.0.0.1", func(SignalMessage) error { return nil }); err == nil {
 		t.Error("second client should be refused by max_clients=1")
@@ -157,7 +215,10 @@ func TestHubEndToEnd(t *testing.T) {
 
 	select {
 	case <-gotVideo:
-		t.Logf("received %d H.264 RTP packets", packets.Load())
+		t.Logf("received %d %s RTP packets", packets.Load(), wantMime)
+		if delayed.Load() != packets.Load() && delayed.Load() < 60 {
+			t.Errorf("only %d of %d packets carry playout-delay 0", delayed.Load(), packets.Load())
+		}
 	case <-ctx.Done():
 		t.Fatalf("no video RTP received (state=%s, packets=%d)", browser.ConnectionState(), packets.Load())
 	}
@@ -170,7 +231,7 @@ func TestHubEndToEnd(t *testing.T) {
 		t.Fatal("no pong on control channel")
 	}
 	st := hub.Stats()
-	if st.Clients != 1 || !st.Running || st.Encoder != "x264" || st.Frames == 0 {
+	if st.Clients != 1 || !st.Running || st.Encoder != wantEncoder || st.Frames == 0 {
 		t.Errorf("stats = %+v", st)
 	}
 
