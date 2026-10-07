@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a1630"/>
+      <stop offset="1" stop-color="#16406e"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="0.4" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#0c4a6e"/>
+    </linearGradient>
+    <linearGradient id="barrel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b3b5c"/>
+      <stop offset="1" stop-color="#0f766e"/>
+    </linearGradient>
+    <linearGradient id="sea" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d9488"/>
+      <stop offset="1" stop-color="#083358"/>
+    </linearGradient>
+    <linearGradient id="sail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d6e4f2"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="url(#sky)"/>
+  <circle cx="214" cy="50" r="17" fill="#fbbf24"/>
+
+  <!-- the wave: face and barrel on the left, lip curling over to the left -->
+  <path fill="url(#wave)" d="M22 208 C70 204 114 194 136 170 C152 152 156 134 148 124
+    C140 114 124 116 119 127 C115 136 104 135 104 126 C104 104 136 96 172 100
+    C208 104 234 128 247 160 C253 176 256 190 256 200 L256 214 L22 214 Z"/>
+  <path fill="url(#barrel)" d="M136 170 C152 152 156 134 148 124 C140 116 128 118 124 126
+    C132 134 134 148 128 160 C120 176 100 188 76 198 C102 194 122 186 136 170 Z"/>
+  <!-- foam on the lip, with fingers reaching down from the curl -->
+  <path fill="none" stroke="#f0fdff" stroke-width="6" stroke-linecap="round"
+    d="M107 125 C107 106 136 100 170 103 C196 106 218 120 232 142"/>
+  <path fill="#f0fdff" d="M104 126 C100 132 98 140 100 146 C104 140 108 136 112 134 Z"/>
+  <path fill="#f0fdff" d="M112 132 C112 140 112 146 115 151 C117 144 120 139 122 135 Z"/>
+  <path fill="none" stroke="#f0fdff" stroke-width="3" stroke-linecap="round" opacity="0.75"
+    d="M156 116 C182 114 204 126 218 146"/>
+
+  <!-- spray thrown up behind the hulls as they leave the crest -->
+  <path fill="#f0fdff" opacity="0.9" d="M150 104 C156 92 168 86 182 86 C172 90 164 96 160 104 Z"/>
+  <circle cx="170" cy="80" r="3.4" fill="#f0fdff"/>
+  <circle cx="182" cy="76" r="2.8" fill="#f0fdff" opacity="0.9"/>
+  <circle cx="192" cy="84" r="2.4" fill="#f0fdff" opacity="0.8"/>
+  <circle cx="186" cy="68" r="1.9" fill="#f0fdff" opacity="0.7"/>
+  <circle cx="198" cy="74" r="1.7" fill="#f0fdff" opacity="0.6"/>
+
+  <!-- the sea -->
+  <path fill="url(#sea)" d="M0 200 C36 190 74 210 120 202 C162 194 208 192 256 200
+    A56 56 0 0 1 200 256 L56 256 A56 56 0 0 1 0 200 Z"/>
+  <path fill="none" stroke="#5eead4" stroke-width="3" stroke-linecap="round" opacity="0.55"
+    d="M22 224 C46 218 66 228 90 222 M150 230 C172 224 192 232 214 226"/>
+
+  <!-- the catamaran (two hulls, trampoline between), skimming just over the
+       crest with its bows lifted -->
+  <g transform="translate(118 100) rotate(-11) scale(0.84)">
+    <path fill="#7f95b2" d="M-30 -24 L52 -24 L52 -19 C30 -16 -6 -16 -38 -22 Z"/>
+    <path fill="#1e3a5f" opacity="0.9" d="M-22 -9 L36 -9 L48 -21 L-10 -21 Z"/>
+    <path fill="#e2e8f0" d="M-22 -9 L-19 -9 L-7 -21 L-10 -21 Z M30 -9 L33 -9 L45 -21 L42 -21 Z"/>
+    <rect x="9" y="-106" width="3.6" height="92" rx="1.8" fill="#e2e8f0"/>
+    <path fill="url(#sail)" d="M13.8 -104 L13.8 -22 L54 -24 C48 -54 34 -82 13.8 -104 Z"/>
+    <path fill="#14b8a6" d="M13.8 -52 L45 -48 C47 -42 49 -35 50.5 -31 L13.8 -35 Z"/>
+    <path fill="url(#sail)" d="M5.5 -94 L-38 -14 L2 -18 C4 -44 5.5 -70 5.5 -94 Z"/>
+    <path fill="#f8fafc" d="M-44 -9 L42 -9 L42 -2 C20 2 -18 2 -50 -7 Z"/>
+    <path fill="#14b8a6" d="M-30 -6 L38 -6 L38 -4 L-28 -4 Z"/>
+  </g>
+</svg>

@@ -12,6 +12,7 @@ html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.
 .top { display: flex; justify-content: space-between; align-items: center; padding: 14px 24px; border-bottom: 1px solid var(--line); }
 .brand { display: flex; gap: 10px; align-items: center; font-weight: 700; font-size: 18px; }
 .brand img { width: 28px; height: 28px; }
+.hero-logo { display: block; width: 112px; height: 112px; margin: 0 auto 8px; }
 .top-right { display: flex; gap: 12px; align-items: center; }
 main { margin: 28px auto; padding: 0 16px; }
 .narrow { max-width: 480px; }
@@ -66,7 +67,7 @@ button:disabled { opacity: .6; cursor: progress; }
 .adv { border-top: 1px solid var(--line); padding-top: 10px; }
 .adv[open] { display: flex; flex-direction: column; gap: 12px; }
 summary { cursor: pointer; color: var(--muted); font-size: 14px; }
-.actions { display: flex; align-items: center; gap: 14px; }
+.actions { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .saved { color: var(--ok); font-size: 14px; }
 .users { list-style: none; padding: 0; margin: 0 0 12px; }
 .users li { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }

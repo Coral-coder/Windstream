@@ -16,6 +16,7 @@
 <!-- First run -->
 <main id="view-setup" class="narrow hidden">
   <section class="card" id="setup-1">
+    <img class="hero-logo" src="/logo.svg" alt="" width="112" height="112">
     <h1>Welcome to Windstream</h1>
     <p class="muted">Create the account you'll use to sign in from your phone, laptop or TV. While you do this, Windstream is setting up this PC in the background.</p>
     <form id="form-setup-1" class="stack">
@@ -140,6 +141,14 @@
   </section>
 
   <section class="card">
+    <h2>Troubleshooting</h2>
+    <p class="muted">Something not working? Download the logs and send the file along with a description of what happened. Passwords and authenticator secrets are never included.</p>
+    <div class="actions">
+      <button type="button" id="btn-logs-zip">Download logs</button>
+      <button type="button" class="ghost" id="btn-logs-open">Open logs folder</button>
+      <button type="button" class="ghost" id="btn-logs-copy">Copy recent activity</button>
+      <span class="saved hidden" id="logs-note"></span>
+    </div>
     <details><summary>Activity log</summary><pre id="logs" class="logs"></pre></details>
   </section>
 

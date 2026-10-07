@@ -14,7 +14,9 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 #login { align-items: center; justify-content: center; padding: 16px; }
 .card { background: var(--panel); border-radius: 16px; padding: 28px; width: 100%; max-width: 380px; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
 .card h1 { margin: 0; font-size: 24px; }
-.logo { color: var(--accent); }
+.logo { display: block; width: 96px; height: 96px; margin: 0 auto 4px; }
+#login-form h1 { text-align: center; }
+#toolbar .brand img { width: 18px; height: 18px; vertical-align: -4px; margin-right: 4px; }
 .muted { color: var(--muted); margin: 0; }
 label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
 input { padding: 10px 12px; border-radius: 10px; border: 1px solid #263150; background: #0f1527; color: var(--text); font-size: 16px; }

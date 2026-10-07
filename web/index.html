@@ -6,12 +6,14 @@
 <meta name="referrer" content="no-referrer">
 <title>Windstream</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.png">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <main id="login" class="screen">
   <form id="login-form" class="card" autocomplete="on">
-    <h1><span class="logo">⟡</span> Windstream</h1>
+    <img class="logo" src="/logo.svg" alt="" width="96" height="96">
+    <h1>Windstream</h1>
     <p class="muted">Sign in to your game server.</p>
     <label>Username <input name="username" autocomplete="username" required autofocus></label>
     <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
@@ -31,7 +33,7 @@
     <pre id="stats" class="stats hidden"></pre>
   </div>
   <nav id="toolbar">
-    <span class="brand">⟡ Windstream</span>
+    <span class="brand"><img src="/favicon.svg" alt=""> Windstream</span>
     <span id="pads" class="pads" title="Connected controllers">🎮 0</span>
     <span class="spacer"></span>
     <button id="btn-mute" title="Toggle audio">🔇</button>

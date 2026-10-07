@@ -6,6 +6,8 @@ let setupToken = null;
 let addToken = null;
 let settingsDirty = false;
 
+let lastState = null; // latest /api/state, for the troubleshooting buttons
+
 async function api(path, body) {
   const res = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
@@ -208,6 +210,7 @@ $('#btn-uninstall').addEventListener('click', async () => {
 });
 
 function renderDash(s) {
+  lastState = s;
   $('#who').textContent = s.user;
   const n = s.network || {};
   const link = $('#link');
@@ -223,7 +226,7 @@ function renderDash(s) {
   else if (!n.public_url && !s.dev) w = n.checked ? "Couldn't detect your public address. The home-network link still works." : 'Still detecting your public address…';
   warn.textContent = w; warn.classList.toggle('hidden', !w);
   const crash = $('#crash-note');
-  crash.textContent = s.last_crash ? `Windstream hit a problem and restarted itself automatically (${s.last_crash}). Details: C:\\ProgramData\\Windstream\\logs\\crash.log` : '';
+  crash.textContent = s.last_crash ? `Windstream hit a problem and restarted itself automatically (${s.last_crash}). Use "Download logs" under Troubleshooting to send the details.` : '';
   crash.classList.toggle('hidden', !s.last_crash);
 
   renderDeps(s.deps || []);
@@ -269,3 +272,34 @@ async function refresh() {
 
 refresh();
 setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+
+// ---- troubleshooting ----
+function logsNote(text, isError = false) {
+  const n = $('#logs-note');
+  n.textContent = text;
+  n.classList.toggle('saved', !isError);
+  n.classList.toggle('error', isError);
+  n.classList.toggle('hidden', !text);
+  if (text) setTimeout(() => { if (n.textContent === text) n.classList.add('hidden'); }, 6000);
+}
+$('#btn-logs-zip').addEventListener('click', () => {
+  location.href = '/api/logs.zip'; // served as an attachment: the page stays put
+  logsNote('Downloading… check your Downloads folder.');
+});
+$('#btn-logs-open').addEventListener('click', async () => {
+  try {
+    await api('/api/logs/open', {});
+    logsNote('Opened in File Explorer ✓');
+  } catch (e) { logsNote(e.message, true); }
+});
+$('#btn-logs-copy').addEventListener('click', async () => {
+  const s = lastState || {};
+  const text = [`Windstream ${s.version || ''}`, s.last_crash ? `Last crash: ${s.last_crash}` : '', ...(s.logs || []).slice(-200)]
+    .filter(Boolean).join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    logsNote('Copied the last 200 log lines ✓');
+  } catch {
+    logsNote('Copy failed; use Download logs instead.', true);
+  }
+});

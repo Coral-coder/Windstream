@@ -1,74 +1,72 @@
-// Command genres draws the Windstream icon and writes the Windows resources
-// (icon, manifest, version info) linked into windstream.exe, plus the tray
+// Command genres turns the Windstream logo into the Windows resources
+// linked into windstream.exe (icon, manifest, version info) and the tray
 // icon. Run with `go generate ./cmd/windstream`.
+//
+// The logo's source is assets/logo.svg (assets/logo-small.svg is a
+// simplified mark for 32 px and below). If rsvg-convert is installed, the
+// PNGs in assets/icon are re-rendered from the SVGs first; otherwise the
+// committed PNGs are used as they are.
 package main
 
 import (
 	"bytes"
+	"fmt"
 	"image"
-	"image/color"
+	"image/png"
 	"log"
-	"math"
 	"os"
+	"os/exec"
 
 	"github.com/tc-hib/winres"
 	"github.com/tc-hib/winres/version"
 )
 
-func drawIcon(size int) image.Image {
-	img := image.NewNRGBA(image.Rect(0, 0, size, size))
-	bg := color.NRGBA{0x10, 0x18, 0x28, 0xff}
-	wave := color.NRGBA{0x5e, 0xea, 0xd4, 0xff}
-	s := float64(size)
-	radius := s * 0.22
-	const ss = 4 // supersampling for anti-aliasing
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			var bgHits, waveHits int
-			for sy := 0; sy < ss; sy++ {
-				for sx := 0; sx < ss; sx++ {
-					px := float64(x) + (float64(sx)+0.5)/ss
-					py := float64(y) + (float64(sy)+0.5)/ss
-					if !insideRounded(px, py, s, radius) {
-						continue
-					}
-					bgHits++
-					for _, base := range []float64{0.38, 0.62} {
-						cy := s*base + s*0.07*math.Sin((px/s)*2*math.Pi*1.15-0.6)
-						if math.Abs(py-cy) < s*0.055 && px > s*0.17 && px < s*0.83 {
-							waveHits++
-							break
-						}
-					}
-				}
-			}
-			n := float64(ss * ss)
-			if bgHits == 0 {
-				continue
-			}
-			wa := float64(waveHits) / float64(bgHits)
-			c := color.NRGBA{
-				uint8(float64(bg.R)*(1-wa) + float64(wave.R)*wa),
-				uint8(float64(bg.G)*(1-wa) + float64(wave.G)*wa),
-				uint8(float64(bg.B)*(1-wa) + float64(wave.B)*wa),
-				uint8(255 * float64(bgHits) / n),
-			}
-			img.SetNRGBA(x, y, c)
-		}
-	}
-	return img
-}
-
-func insideRounded(x, y, s, r float64) bool {
-	cx := math.Max(r, math.Min(s-r, x))
-	cy := math.Max(r, math.Min(s-r, y))
-	return (x-cx)*(x-cx)+(y-cy)*(y-cy) <= r*r
-}
+var sizes = []int{16, 20, 24, 32, 40, 48, 64, 256}
 
 func main() {
+	if _, err := exec.LookPath("rsvg-convert"); err == nil {
+		for _, sz := range sizes {
+			src := "../../assets/logo.svg"
+			if sz <= 32 {
+				src = "../../assets/logo-small.svg" // stays legible when tiny
+			}
+			out := fmt.Sprintf("../../assets/icon/%d.png", sz)
+			if b, err := exec.Command("rsvg-convert", "-w", fmt.Sprint(sz), "-h", fmt.Sprint(sz), "-o", out, src).CombinedOutput(); err != nil {
+				log.Fatalf("render %s: %v %s", out, err, b)
+			}
+		}
+	} else {
+		log.Print("rsvg-convert not found; using the committed PNGs in assets/icon")
+	}
+	// The web pages embed copies of the same artwork.
+	for src, dsts := range map[string][]string{
+		"../../assets/logo.svg":       {"../../web/logo.svg", "../../web/admin/logo.svg"},
+		"../../assets/logo-small.svg": {"../../web/favicon.svg", "../../web/admin/favicon.svg"},
+		"../../assets/icon/256.png":   {"../../web/icon.png"},
+	} {
+		b, err := os.ReadFile(src)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, d := range dsts {
+			if err := os.WriteFile(d, b, 0o644); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+
 	var imgs []image.Image
-	for _, sz := range []int{16, 20, 24, 32, 40, 48, 64, 256} {
-		imgs = append(imgs, drawIcon(sz))
+	for _, sz := range sizes {
+		f, err := os.Open(fmt.Sprintf("../../assets/icon/%d.png", sz))
+		if err != nil {
+			log.Fatal(err)
+		}
+		img, err := png.Decode(f)
+		f.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+		imgs = append(imgs, img)
 	}
 	icon, err := winres.NewIconFromImages(imgs)
 	if err != nil {

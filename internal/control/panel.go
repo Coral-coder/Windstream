@@ -94,6 +94,8 @@ func (p *panel) routes() http.Handler {
 	mux.HandleFunc("POST /api/network/refresh", p.authed(p.handleNetRefresh))
 	mux.HandleFunc("POST /api/uninstall", p.authed(p.handleUninstall))
 	mux.HandleFunc("POST /api/quit", p.authed(p.handleQuit))
+	mux.HandleFunc("GET /api/logs.zip", p.authed(p.handleLogsZip))
+	mux.HandleFunc("POST /api/logs/open", p.authed(p.handleOpenLogs))
 	return p.guard(mux)
 }
 

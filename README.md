@@ -65,7 +65,9 @@ below.
   watched by the tray app. If it ever crashes or locks up, it is restarted
   within seconds with the screen layout restored, and browsers reconnect on
   their own. The cause is written to `logs\crash.log` and shown on the
-  dashboard.
+  dashboard. **Download logs** on the dashboard (or **Open logs folder** in
+  the tray menu) gives you everything needed for a bug report in one zip,
+  with passwords and authenticator secrets left out.
 - **Supports controllers.** Pair a Bluetooth or USB controller with the
   device you play on. Each one appears on the PC as an Xbox 360 controller.
   Keyboard and mouse work too.

@@ -6,7 +6,9 @@ import (
 	"context"
 	_ "embed"
 	"errors"
+	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +71,32 @@ func (p *platform) Uninstall(removeData bool) error {
 
 func (p *platform) Quit() { p.quit() }
 
+// OpenFolder shows a folder in File Explorer.
+func (p *platform) OpenFolder(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	openURL(path)
+	return nil
+}
+
+// SystemInfo describes the Windows version for diagnostics.
+func (p *platform) SystemInfo() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Windows NT\CurrentVersion`, registry.QUERY_VALUE)
+	if err != nil {
+		return "Windows (version unknown)"
+	}
+	defer k.Close()
+	name, _, _ := k.GetStringValue("ProductName")
+	disp, _, _ := k.GetStringValue("DisplayVersion")
+	build, _, _ := k.GetStringValue("CurrentBuild")
+	ubr, _, _ := k.GetIntegerValue("UBR")
+	if b, err := strconv.Atoi(build); err == nil && b >= 22000 {
+		name = strings.Replace(name, "Windows 10", "Windows 11", 1) // ProductName still says 10
+	}
+	return fmt.Sprintf("%s %s (build %s.%d)", name, disp, build, ubr)
+}
+
 // Resident is the long-running app started at logon: one instance per
 // session, a tray icon, and a supervisor that runs the streaming server in a
 // separate worker process (see supervise). If the worker ever dies — a Go
@@ -113,6 +141,7 @@ func Resident() error {
 		systray.SetTooltip("Windstream – starting")
 		mOpen := systray.AddMenuItem("Open Windstream", "Open the dashboard")
 		mLink := systray.AddMenuItem("Open my stream link", "Open the address you play from")
+		mLogs := systray.AddMenuItem("Open logs folder", "Show Windstream's log files")
 		systray.AddSeparator()
 		mQuit := systray.AddMenuItem("Quit Windstream", "Stop streaming and close")
 		systray.SetOnTapped(func() { openURL(PanelURL()) })
@@ -137,6 +166,9 @@ func Resident() error {
 					} else {
 						openURL(PanelURL())
 					}
+				case <-mLogs.ClickedCh:
+					_ = os.MkdirAll(logsDir(), 0o700)
+					openURL(logsDir())
 				case <-mQuit.ClickedCh:
 					quit()
 				case <-t.C:

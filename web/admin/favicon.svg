@@ -1,1 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#101828"/><path d="M12 24c8-6 16 6 24 0s12-6 16 0M12 40c8-6 16 6 24 0s12-6 16 0" fill="none" stroke="#5eead4" stroke-width="5" stroke-linecap="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Simplified mark for 16-32 px (tray, taskbar, browser tab). -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0a1630"/>
+      <stop offset="1" stop-color="#16406e"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5eead4"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#sky)"/>
+  <!-- wave curling left -->
+  <g transform="translate(0 5)">
+  <path fill="url(#wave)" d="M4 54 C18 53 28 48 32 42 C36 37 36 32 33 30 C30 28 27 30 27 33
+    C25 33 24 31 25 28 C27 22 36 20 44 22 C53 25 59 34 60 44 L60 54 Z"/>
+  <path fill="none" stroke="#f0fdff" stroke-width="2.6" stroke-linecap="round"
+    d="M26 30 C28 24 37 22 44 24 C50 26 54 31 56 36"/>
+  </g>
+  <!-- sea -->
+  <path fill="#0d9488" d="M0 50 C12 47 24 53 36 50 C46 48 56 48 64 50 L64 50
+    A14 14 0 0 1 50 64 L14 64 A14 14 0 0 1 0 50 Z"/>
+  <!-- catamaran: sails and twin hulls -->
+  <g transform="translate(27 26) rotate(-11)">
+    <path fill="#ffffff" d="M3 -18 L3 -1 L12 -1.5 C10 -8 7 -14 3 -18 Z"/>
+    <path fill="#ffffff" d="M1 -16 L-8 -0.5 L0.5 -1 Z"/>
+    <path fill="#94a3b8" d="M-6 -1 L13 -1 L13 0.6 L-7 0.6 Z"/>
+    <path fill="#ffffff" d="M-11 1.6 L10 1.6 L10 3.4 C3 4.4 -5 4.2 -12 2.6 Z"/>
+  </g>
+</svg>
