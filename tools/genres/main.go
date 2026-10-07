@@ -3,7 +3,7 @@
 // icon. Run with `go generate ./cmd/windstream`.
 //
 // The logo's source is assets/logo.svg (assets/logo-small.svg is a
-// simplified mark for 32 px and below). If rsvg-convert is installed, the
+// simplified mark for 48 px and below). If rsvg-convert is installed, the
 // PNGs in assets/icon are re-rendered from the SVGs first; otherwise the
 // committed PNGs are used as they are.
 package main
@@ -27,7 +27,7 @@ func main() {
 	if _, err := exec.LookPath("rsvg-convert"); err == nil {
 		for _, sz := range sizes {
 			src := "../../assets/logo.svg"
-			if sz <= 32 {
+			if sz <= 48 {
 				src = "../../assets/logo-small.svg" // stays legible when tiny
 			}
 			out := fmt.Sprintf("../../assets/icon/%d.png", sz)

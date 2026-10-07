@@ -1,31 +1,34 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
-  <!-- Simplified mark for 16-32 px (tray, taskbar, browser tab). -->
+  <!-- Simplified mark for 16-32 px (tray, taskbar, browser tab): the same
+       scene as logo.svg with only the shapes that survive at that size. -->
   <defs>
+    <clipPath id="t"><rect width="64" height="64" rx="14"/></clipPath>
     <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#0a1630"/>
-      <stop offset="1" stop-color="#16406e"/>
+      <stop offset="0" stop-color="#0a1736"/>
+      <stop offset="0.55" stop-color="#2b5f93"/>
+      <stop offset="1" stop-color="#f0a85c"/>
     </linearGradient>
-    <linearGradient id="wave" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#5eead4"/>
-      <stop offset="1" stop-color="#0d9488"/>
+    <linearGradient id="face" x1="0" y1="0" x2="0.3" y2="1">
+      <stop offset="0" stop-color="#7ff0e0"/>
+      <stop offset="0.5" stop-color="#139f98"/>
+      <stop offset="1" stop-color="#063253"/>
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="14" fill="url(#sky)"/>
-  <!-- wave curling left -->
-  <g transform="translate(0 5)">
-  <path fill="url(#wave)" d="M4 54 C18 53 28 48 32 42 C36 37 36 32 33 30 C30 28 27 30 27 33
-    C25 33 24 31 25 28 C27 22 36 20 44 22 C53 25 59 34 60 44 L60 54 Z"/>
-  <path fill="none" stroke="#f0fdff" stroke-width="2.6" stroke-linecap="round"
-    d="M26 30 C28 24 37 22 44 24 C50 26 54 31 56 36"/>
-  </g>
-  <!-- sea -->
-  <path fill="#0d9488" d="M0 50 C12 47 24 53 36 50 C46 48 56 48 64 50 L64 50
-    A14 14 0 0 1 50 64 L14 64 A14 14 0 0 1 0 50 Z"/>
-  <!-- catamaran: sails and twin hulls -->
-  <g transform="translate(27 26) rotate(-11)">
-    <path fill="#ffffff" d="M3 -18 L3 -1 L12 -1.5 C10 -8 7 -14 3 -18 Z"/>
-    <path fill="#ffffff" d="M1 -16 L-8 -0.5 L0.5 -1 Z"/>
-    <path fill="#94a3b8" d="M-6 -1 L13 -1 L13 0.6 L-7 0.6 Z"/>
-    <path fill="#ffffff" d="M-11 1.6 L10 1.6 L10 3.4 C3 4.4 -5 4.2 -12 2.6 Z"/>
+  <g clip-path="url(#t)">
+    <rect width="64" height="64" fill="url(#sky)"/>
+    <circle cx="54" cy="12" r="7" fill="#ffd28a" opacity="0.9"/>
+    <!-- wave face and curling lip -->
+    <path fill="url(#face)" d="M-1 14 C12 6 26 8 34 16 C40 24 38 40 30 54 L-1 54 Z"/>
+    <path fill="#c8fff7" d="M-1 8 C10 1 26 1 34 8 C40 14 40 22 35 23 C33 23 32 21 33 19
+      C35 14 30 10 24 10 C14 9 6 12 -1 17 Z"/>
+    <path fill="#06233d" d="M-1 52 C14 49 30 53 44 50 C52 48 58 49 65 48 L65 65 L-1 65 Z"/>
+    <!-- sails towering over us -->
+    <path fill="#5eead4" d="M47 6 C40 16 32 26 26 34 C32 34 40 36 44 40 Z"/>
+    <path fill="#ffffff" d="M47 6 L57 44 C52 44 47 43 43 42 Z"/>
+    <path fill="#dfe8f2" d="M46 6 L47 6 L45 46 L43 46 Z"/>
+    <!-- twin bows coming at us -->
+    <path fill="#ffffff" d="M28 41 L50 48 L48 50 L27 44 Z"/>
+    <path fill="#e8eef6" d="M42 46 L62 49 L60 56 C54 56 47 54 42 50 Z"/>
+    <path fill="#f4feff" d="M40 53 C46 58 54 59 62 58 C56 62 46 62 38 56 Z" opacity="0.9"/>
   </g>
 </svg>
