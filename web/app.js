@@ -154,6 +154,15 @@ async function handleSignal(msg) {
   }
 }
 
+// minimizeBuffering asks the browser to hold as little received media as
+// possible. These hints reduce the receive-side latency a lot; support
+// varies by browser, so they are re-applied periodically below.
+function minimizeBuffering(receiver) {
+  if (!receiver) return;
+  try { receiver.playoutDelayHint = 0; } catch { /* unsupported */ }
+  try { receiver.jitterBufferTarget = 0; } catch { /* unsupported */ }
+}
+
 function createPeer(iceServers) {
   teardownPeer();
   const pc = new RTCPeerConnection({ iceServers, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
@@ -162,8 +171,7 @@ function createPeer(iceServers) {
   pc.ontrack = (ev) => {
     stream.addTrack(ev.track);
     ui.video.srcObject = stream;
-    try { ev.receiver.playoutDelayHint = 0; } catch { /* unsupported */ }
-    try { ev.receiver.jitterBufferTarget = 0; } catch { /* unsupported */ }
+    minimizeBuffering(ev.receiver);
     ui.video.play().catch(() => {});
   };
   pc.onicecandidate = (ev) => { if (ev.candidate) signal({ type: 'candidate', candidate: ev.candidate.toJSON() }); };
@@ -397,6 +405,7 @@ setInterval(async () => {
   const dv = new DataView(new ArrayBuffer(5));
   dv.setUint8(0, MSG.PING); dv.setUint32(1, performance.now() & 0xffffffff, true);
   sendControl(dv.buffer);
+  for (const r of state.pc.getReceivers()) minimizeBuffering(r);
   if (!state.showStats) return;
   const report = await state.pc.getStats();
   let video = null, pair = null;

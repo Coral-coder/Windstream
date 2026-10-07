@@ -89,7 +89,14 @@ func Candidates(ctx context.Context, cfg VideoConfig) ([]string, map[string]erro
 // frame is held back waiting for the next one.
 func BuildVideoArgs(cfg VideoConfig, encoder string, src Source, rtpURL string) []string {
 	kbps := strconv.Itoa(cfg.BitrateKbps) + "k"
-	vbv := strconv.Itoa(cfg.BitrateKbps/cfg.FPS*2) + "k" // ~2 frames of buffer: bounded per-frame size, minimal queueing
+	// One frame of rate-control buffer: the encoder may not run ahead, which
+	// is the lowest-latency setting (at a small cost to quality on very busy
+	// frames). This is a game streamer, so latency wins.
+	vbvKbps := cfg.BitrateKbps / cfg.FPS
+	if vbvKbps < 500 {
+		vbvKbps = 500
+	}
+	vbv := strconv.Itoa(vbvKbps) + "k"
 	gop := strconv.Itoa(cfg.GOPFrames)
 	fps := strconv.Itoa(cfg.FPS)
 	cursor := "0"
@@ -100,7 +107,8 @@ func BuildVideoArgs(cfg VideoConfig, encoder string, src Source, rtpURL string) 
 	if profile == "" {
 		profile = "high"
 	}
-	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-nostats"}
+	args := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-nostats",
+		"-fflags", "nobuffer", "-flags", "low_delay"}
 
 	if src.Test {
 		args = append(args, "-re", "-f", "lavfi", "-i",
@@ -139,7 +147,8 @@ func BuildVideoArgs(cfg VideoConfig, encoder string, src Source, rtpURL string) 
 			preset = "p1"
 		}
 		args = append(args, "-c:v", "h264_nvenc", "-preset", preset, "-tune", "ull", "-rc", "cbr",
-			"-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-no-scenecut", "1", "-rc-lookahead", "0")
+			"-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-no-scenecut", "1",
+			"-rc-lookahead", "0", "-multipass", "0", "-b_ref_mode", "0")
 	case "amf":
 		if preset == "" {
 			preset = "speed"
