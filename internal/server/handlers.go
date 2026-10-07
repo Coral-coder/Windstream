@@ -13,6 +13,8 @@ import (
 
 	"github.com/coral-coder/windstream/internal/auth"
 	"github.com/coral-coder/windstream/internal/stream"
+
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 type loginRequest struct {
@@ -142,6 +144,7 @@ func (s *Server) handleSignal(w http.ResponseWriter, r *http.Request) {
 
 	// Close the socket when the peer connection dies or the session is revoked.
 	go func() {
+		defer safe.Recover(s.log, "signaling watchdog")
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
 		for {

@@ -434,14 +434,18 @@ $('#btn-logout').addEventListener('click', async () => {
 });
 
 // ---------- stats ----------
-setInterval(async () => {
+setInterval(() => { updateStats().catch((e) => console.warn('stats', e)); }, 1000);
+
+async function updateStats() {
   if (!state.pc) return;
   const dv = new DataView(new ArrayBuffer(5));
   dv.setUint8(0, MSG.PING); dv.setUint32(1, performance.now() & 0xffffffff, true);
   sendControl(dv.buffer);
   for (const r of state.pc.getReceivers()) minimizeBuffering(r);
   if (!state.showStats) return;
-  const report = await state.pc.getStats();
+  const pc = state.pc;
+  const report = await pc.getStats();
+  if (pc !== state.pc) return; // reconnected meanwhile
   let video = null, pair = null;
   report.forEach((s) => {
     if (s.type === 'inbound-rtp' && s.kind === 'video') video = s;
@@ -456,7 +460,7 @@ setInterval(async () => {
     const codec = video.codecId && report.get(video.codecId);
     const df = video.framesDecoded - prev.frames;
     lines.push(`video   ${video.frameWidth || 0}x${video.frameHeight || 0} ${(df / dt).toFixed(0)} fps`);
-    lines.push(`codec   ${codec ? codec.mimeType.replace('video/', '') : state.codec || '?'} ${video.powerEfficientDecoder ? '(hw decode)' : '(sw decode)'}`);
+    lines.push(`codec   ${codec && codec.mimeType ? codec.mimeType.replace('video/', '') : state.codec || '?'} ${video.powerEfficientDecoder ? '(hw decode)' : '(sw decode)'}`);
     if (df > 0) lines.push(`decode  ${(((video.totalDecodeTime || 0) - prev.decode) / df * 1000).toFixed(1)} ms  recv→decoded ${(((video.totalProcessingDelay || 0) - prev.processing) / df * 1000).toFixed(1)} ms`);
     lines.push(`bitrate ${(((video.bytesReceived - prev.bytes) * 8) / dt / 1e6).toFixed(1)} Mbps`);
     lines.push(`loss    ${video.packetsLost || 0} pkts  nack ${video.nackCount || 0}  pli ${video.pliCount || 0}`);
@@ -467,6 +471,6 @@ setInterval(async () => {
   if (state.rtt != null) lines.push(`rtt     ${state.rtt.toFixed(0)} ms (input)`);
   lines.push(`pads    ${state.pads.size}`);
   ui.stats.textContent = lines.join('\n') || 'collecting…';
-}, 1000);
+}
 
 boot();

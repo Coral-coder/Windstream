@@ -24,6 +24,8 @@ import (
 	"github.com/coral-coder/windstream/internal/config"
 	"github.com/coral-coder/windstream/internal/stream"
 	"github.com/coral-coder/windstream/web"
+
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 const sessionCookie = "__Host-windstream"
@@ -185,7 +187,7 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() { errCh <- redirect.ListenAndServe() }()
 	}
 
-	go s.janitor(ctx)
+	safe.Go(s.log, "session janitor", func() { s.janitor(ctx) })
 
 	select {
 	case <-ctx.Done():

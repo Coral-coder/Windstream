@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"strconv"
 	"time"
+
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 // AudioConfig configures audio capture into Opus.
@@ -78,7 +80,11 @@ func RunAudio(ctx context.Context, cfg AudioConfig, log *slog.Logger, onSample f
 	err := runLoopback(ctx, cfg.Device, log, func(pcm PCMFormat, src io.Reader) {
 		close(started)
 		go func() {
-			errCh <- runAudioFFmpeg(ctx, cfg, &pcm, src, log, onSample)
+			var ffErr error
+			if safe.Call(log, "audio encoder", func() { ffErr = runAudioFFmpeg(ctx, cfg, &pcm, src, log, onSample) }) {
+				ffErr = errors.New("audio encoder hit an internal error")
+			}
+			errCh <- ffErr
 			cancel()
 			// Unblock the capture loop if it is mid-write to a dead encoder.
 			if c, ok := src.(io.Closer); ok {
@@ -146,14 +152,33 @@ func runAudioFFmpeg(ctx context.Context, cfg AudioConfig, pcm *PCMFormat, stdin 
 	return errors.New("ffmpeg exited unexpectedly")
 }
 
+// logStderr forwards ffmpeg's warnings to the log, at most 20 lines per 10
+// seconds so a chatty encoder cannot flood the log; the rest are counted.
 func logStderr(r io.Reader, log *slog.Logger) {
+	defer safe.Recover(log, "ffmpeg log reader")
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 64*1024)
+	window, logged, dropped := time.Now(), 0, 0
 	for sc.Scan() {
-		if line := sc.Text(); line != "" {
-			log.Warn("ffmpeg: " + line)
+		line := sc.Text()
+		if line == "" {
+			continue
 		}
+		if time.Since(window) > 10*time.Second {
+			if dropped > 0 {
+				log.Warn("ffmpeg: further messages suppressed", "count", dropped)
+			}
+			window, logged, dropped = time.Now(), 0, 0
+		}
+		if logged >= 20 {
+			dropped++
+			continue
+		}
+		logged++
+		log.Warn("ffmpeg: " + line)
 	}
+	// Drain anything left so ffmpeg never blocks writing to a full pipe.
+	_, _ = io.Copy(io.Discard, r)
 }
 
 // OggReader extracts logical packets from an Ogg bitstream, handling packets
@@ -203,6 +228,10 @@ func (o *OggReader) readPage() error {
 	for _, l := range lacing {
 		o.partial = append(o.partial, body[off:off+int(l)]...)
 		off += int(l)
+		if len(o.partial) > 1<<20 { // no Opus packet is anywhere near this
+			o.partial = nil
+			return errors.New("ogg: oversized packet")
+		}
 		if l < 255 {
 			o.queue = append(o.queue, o.partial)
 			o.partial = nil

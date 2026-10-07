@@ -12,6 +12,7 @@ type platformState struct{}
 func (m *Manager) startPlatform(context.Context) error { return ErrUnsupported }
 func (m *Manager) targetPlatform() (Target, error)     { return Target{}, ErrUnsupported }
 func (m *Manager) stopPlatform()                       {}
+func (m *Manager) recoverPlatform()                    {}
 
 func configureLaunch(*exec.Cmd) {}
 

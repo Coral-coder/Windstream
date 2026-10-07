@@ -222,6 +222,9 @@ function renderDash(s) {
   else if (n.upnp && n.upnp !== 'mapped' && n.upnp !== 'disabled') w = 'Automatic router setup failed. Add the port forwards shown under "Internet access" so the link works outside your home.';
   else if (!n.public_url && !s.dev) w = n.checked ? "Couldn't detect your public address. The home-network link still works." : 'Still detecting your public address…';
   warn.textContent = w; warn.classList.toggle('hidden', !w);
+  const crash = $('#crash-note');
+  crash.textContent = s.last_crash ? `Windstream hit a problem and restarted itself automatically (${s.last_crash}). Details: C:\\ProgramData\\Windstream\\logs\\crash.log` : '';
+  crash.classList.toggle('hidden', !s.last_crash);
 
   renderDeps(s.deps || []);
   const st = s.stream || {};

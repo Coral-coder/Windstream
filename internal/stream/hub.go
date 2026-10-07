@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -24,6 +23,7 @@ import (
 	"github.com/coral-coder/windstream/internal/config"
 	"github.com/coral-coder/windstream/internal/input"
 	wsmedia "github.com/coral-coder/windstream/internal/media"
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 // Config is the hub configuration assembled by the serve command.
@@ -266,6 +266,7 @@ func (h *Hub) removeClient(c *Client) {
 	delete(h.clients, c)
 	if len(h.clients) == 0 && h.pipeCancel != nil && h.stopTimer == nil {
 		h.stopTimer = time.AfterFunc(h.cfg.StopDelay, func() {
+			defer safe.Recover(h.log, "pipeline stop timer")
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.stopTimer = nil
@@ -280,10 +281,10 @@ func (h *Hub) startPipelinesLocked() {
 	ctx, cancel := context.WithCancel(h.ctx)
 	h.pipeCancel = cancel
 	h.pipeWG.Add(1)
-	go h.runVideo(ctx)
+	go h.keepRunning(ctx, "video", h.runVideo)
 	if h.cfg.AudioEnabled {
 		h.pipeWG.Add(1)
-		go h.runAudio(ctx)
+		go h.keepRunning(ctx, "audio", h.runAudio)
 	}
 }
 
@@ -299,21 +300,28 @@ func (h *Hub) stopPipelinesLocked() {
 	h.broken = map[string]bool{}
 }
 
-// recoverPipeline keeps a Go panic in a capture pipeline (e.g. a display or
-// encoder edge case) from crashing the whole process; the pipeline simply
-// stops and the error shows on the dashboard.
-func (h *Hub) recoverPipeline(which string) {
-	if r := recover(); r != nil {
-		h.log.Error("capture pipeline crashed (recovered)", "pipeline", which, "panic", r, "stack", string(debug.Stack()))
+// keepRunning runs a capture pipeline until ctx ends. A Go panic inside it
+// (a display, driver or encoder edge case) is logged and the pipeline is
+// started again a second later, instead of crashing the process or leaving
+// viewers with a frozen stream.
+func (h *Hub) keepRunning(ctx context.Context, which string, run func(context.Context)) {
+	defer h.pipeWG.Done()
+	for ctx.Err() == nil {
+		if !safe.Call(h.log, which+" pipeline", func() { run(ctx) }) {
+			return // returned normally: ctx is done
+		}
 		h.mu.Lock()
-		h.lastErr = fmt.Sprintf("%s pipeline error: %v", which, r)
+		h.lastErr = which + " pipeline hit an internal error and was restarted"
 		h.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
 	}
 }
 
 func (h *Hub) runVideo(ctx context.Context) {
-	defer h.pipeWG.Done()
-	defer h.recoverPipeline("video")
 	backoff := time.Second
 	if h.cfg.Acquire != nil {
 		for {
@@ -481,6 +489,7 @@ func (h *Hub) probeCodecs(ctx context.Context, prefs []string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer safe.Recover(h.log, "encoder probe")
 			h.encodersFor(ctx, c)
 		}()
 	}
@@ -531,7 +540,7 @@ func (h *Hub) attach(c *Client, prefs []string) error {
 		return fmt.Errorf("add video track: %w", err)
 	}
 	c.videoSender = sender
-	go drainRTCP(sender)
+	go drainRTCP(c.log, sender)
 	h.lastPrefs = prefs
 	c.log.Info("video codec chosen", "codec", codec, "browser_supports", prefs)
 	if codec != h.codec {
@@ -595,7 +604,7 @@ func (h *Hub) switchCodecLocked(codec string, skip *Client) {
 		}
 		if err := cl.videoSender.ReplaceTrack(h.tracks[codec]); err != nil {
 			cl.log.Warn("viewer cannot switch video codec; disconnecting it", "codec", codec, "error", err)
-			go cl.Close()
+			safe.Go(cl.log, "close viewer", cl.Close)
 		}
 	}
 	if h.runCancel != nil {
@@ -656,8 +665,6 @@ func (h *Hub) onVideoPacket(track *webrtc.TrackLocalStaticRTP, p wsmedia.VideoPa
 }
 
 func (h *Hub) runAudio(ctx context.Context) {
-	defer h.pipeWG.Done()
-	defer h.recoverPipeline("audio")
 	backoff := 2 * time.Second
 	lastErr := ""
 	for ctx.Err() == nil {

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/acme/autocert"
+
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 // AutoTLS serves a Let's Encrypt certificate for the current public hostname
@@ -100,6 +102,7 @@ func (a *AutoTLS) Warm(ctx context.Context) {
 		return
 	}
 	go func() {
+		defer safe.Recover(a.log, "certificate warm-up")
 		// Issuance needs the router mapping to be live; retry a few times.
 		for i := 0; i < 5 && ctx.Err() == nil; i++ {
 			if _, err := a.acme.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err == nil {

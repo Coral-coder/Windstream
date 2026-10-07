@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/pion/rtp"
+
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 // VideoPacket is one RTP packet from the encoder.
@@ -46,6 +48,7 @@ func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src So
 	go logStderr(stderr, log.With("pipeline", "video", "encoder", EncoderName(codec, vendor)))
 	exited := make(chan error, 1)
 	go func() {
+		defer safe.Recover(log, "ffmpeg wait")
 		exited <- cmd.Wait()
 		conn.Close() // unblock the read loop
 	}()

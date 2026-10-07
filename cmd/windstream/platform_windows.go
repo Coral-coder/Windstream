@@ -23,10 +23,15 @@ func platformMain(args []string) bool {
 	case args[0] == "--install":
 		err = winapp.InstallFromArgs(args[1:])
 	case args[0] == "--run":
-		err = winapp.Resident(func(ctx context.Context, p control.Platform, onReady func(*control.Controller)) error {
+		// Tray + supervisor; the server itself runs in a --worker child
+		// that is restarted automatically if it ever crashes.
+		err = winapp.Resident()
+	case args[0] == "--worker":
+		winapp.Worker(func(ctx context.Context, p control.Platform, onReady func(*control.Controller)) error {
 			// Empty PanelAddr: the controller uses the saved dashboard port,
 			// moving to a free one if another program holds it.
-			return runApp(ctx, appOptions{DataDir: winapp.DataDir, Platform: p, OnReady: onReady, OnCrash: winapp.ShowCrash})
+			return runApp(ctx, appOptions{DataDir: winapp.DataDir, Platform: p, OnReady: onReady,
+				LastCrash: os.Getenv(winapp.LastCrashEnv)})
 		})
 	case args[0] == "--vdd-install":
 		// Internal: install the virtual display device in a child process so

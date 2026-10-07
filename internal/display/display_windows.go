@@ -201,6 +201,26 @@ func (m *Manager) targetPlatform() (Target, error) {
 	return Target{}, fmt.Errorf("display %s is no longer attached to the desktop", m.state.device)
 }
 
+func (m *Manager) recoverPlatform() {
+	prev := loadState()
+	if !prev.WeEnabledVDD && prev.OrigPrimary == "" {
+		return
+	}
+	m.log.Info("undoing display changes left by an unclean shutdown",
+		"virtual_monitor_on", prev.WeEnabledVDD, "orig_primary", prev.OrigPrimary)
+	m.state.weEnabledVDD = prev.WeEnabledVDD
+	m.state.origPrimary = prev.OrigPrimary
+	m.state.changedPrimary = prev.OrigPrimary != ""
+	if prev.WeEnabledVDD && m.state.vdd == nil {
+		if vdd, err := findVDD(m.cfg.VirtualDevice); err == nil {
+			m.state.vdd = vdd
+		} else {
+			m.log.Warn("virtual display adapter not found while recovering", "error", err)
+		}
+	}
+	m.stopPlatform()
+}
+
 func (m *Manager) stopPlatform() {
 	if m.state.changedPrimary && m.state.origPrimary != "" {
 		if outs, err := List(); err == nil {

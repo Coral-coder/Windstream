@@ -61,6 +61,11 @@ below.
   Audio is sent as 10 ms Opus frames on its own stream, so the video is
   never held back to lip-sync with it. Mouse movement and controller state
   are sent as soon as they change, not once per screen refresh.
+- **Recovers by itself.** The streaming server runs as a separate process
+  watched by the tray app. If it ever crashes or locks up, it is restarted
+  within seconds with the screen layout restored, and browsers reconnect on
+  their own. The cause is written to `logs\crash.log` and shown on the
+  dashboard.
 - **Supports controllers.** Pair a Bluetooth or USB controller with the
   device you play on. Each one appears on the PC as an Xbox 360 controller.
   Keyboard and mouse work too.

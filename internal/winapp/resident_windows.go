@@ -25,10 +25,10 @@ var trayIcon []byte
 type RunFunc func(ctx context.Context, platform control.Platform, onReady func(*control.Controller)) error
 
 type platform struct {
-	quit      func()
-	uninstall *bool // set when the dashboard asked to uninstall
-	mu        sync.Mutex
-	panelURL  string
+	quit        func()
+	onUninstall func(removeData bool) // the dashboard asked to uninstall
+	mu          sync.Mutex
+	panelURL    string
 }
 
 // PanelReady records the dashboard address for the tray and for the
@@ -41,15 +41,6 @@ func (p *platform) PanelReady(url string) {
 		_ = k.SetStringValue("PanelURL", url)
 		k.Close()
 	}
-}
-
-func (p *platform) panel() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.panelURL != "" {
-		return p.panelURL
-	}
-	return PanelURL()
 }
 
 func (p *platform) SteamExe() string {
@@ -69,21 +60,22 @@ func (p *platform) SteamExe() string {
 	return v
 }
 
-// Uninstall shuts the app down cleanly (restoring the display and closing
-// router ports) and then removes it, all within this process.
+// Uninstall shuts the worker down cleanly (restoring the display and closing
+// router ports); the supervisor then removes the app.
 func (p *platform) Uninstall(removeData bool) error {
-	p.mu.Lock()
-	p.uninstall = &removeData
-	p.mu.Unlock()
-	p.quit()
+	p.onUninstall(removeData)
 	return nil
 }
 
 func (p *platform) Quit() { p.quit() }
 
 // Resident is the long-running app started at logon: one instance per
-// session, a tray icon, and the controller underneath.
-func Resident(run RunFunc) error {
+// session, a tray icon, and a supervisor that runs the streaming server in a
+// separate worker process (see supervise). If the worker ever dies — a Go
+// panic in any goroutine, a fatal runtime error, a crash inside a driver or
+// system DLL — the supervisor records why and starts a fresh one within
+// seconds; viewers' browsers reconnect on their own.
+func Resident() error {
 	mname, _ := windows.UTF16PtrFromString(residentMutex)
 	mutex, err := windows.CreateMutex(nil, true, mname)
 	if errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
@@ -105,17 +97,16 @@ func Resident(run RunFunc) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var once sync.Once
-	done := make(chan error, 1)
-	quit := func() { once.Do(cancel) }
+	// quit also signals the event, which the worker waits on to shut down
+	// cleanly (restoring the display and closing router ports).
+	quit := func() { once.Do(func() { _ = windows.SetEvent(ev); cancel() }) }
 	go func() {
 		_, _ = windows.WaitForSingleObject(ev, windows.INFINITE)
 		quit()
 	}()
 
-	var ctrl *control.Controller
-	var ctrlMu sync.Mutex
-	plat := &platform{quit: quit}
-
+	sup := newSupervisor()
+	done := make(chan struct{})
 	onReady := func() {
 		systray.SetIcon(trayIcon)
 		systray.SetTitle("Windstream")
@@ -124,59 +115,43 @@ func Resident(run RunFunc) error {
 		mLink := systray.AddMenuItem("Open my stream link", "Open the address you play from")
 		systray.AddSeparator()
 		mQuit := systray.AddMenuItem("Quit Windstream", "Stop streaming and close")
-		systray.SetOnTapped(func() { openURL(plat.panel()) })
+		systray.SetOnTapped(func() { openURL(PanelURL()) })
 
 		go func() {
-			done <- run(ctx, plat, func(c *control.Controller) {
-				ctrlMu.Lock()
-				ctrl = c
-				ctrlMu.Unlock()
-			})
-			systray.Quit()
+			defer close(done)
+			defer systray.Quit()
+			sup.run(ctx, quit)
 		}()
 		go func() {
-			t := time.NewTicker(5 * time.Second)
+			t := time.NewTicker(3 * time.Second)
 			defer t.Stop()
 			for {
 				select {
 				case <-ctx.Done():
 					return
 				case <-mOpen.ClickedCh:
-					openURL(plat.panel())
+					openURL(PanelURL())
 				case <-mLink.ClickedCh:
-					ctrlMu.Lock()
-					c := ctrl
-					ctrlMu.Unlock()
-					if c != nil && c.Link() != "" {
-						openURL(c.Link())
+					if st := readWorkerStatus(); st.Link != "" {
+						openURL(st.Link)
 					} else {
-						openURL(plat.panel())
+						openURL(PanelURL())
 					}
 				case <-mQuit.ClickedCh:
 					quit()
 				case <-t.C:
-					ctrlMu.Lock()
-					c := ctrl
-					ctrlMu.Unlock()
-					if c != nil {
-						systray.SetTooltip(c.TrayStatus())
-					}
+					systray.SetTooltip(sup.tooltip())
 				}
 			}
 		}()
 	}
 	systray.Run(onReady, func() { quit() })
-	var runErr error
 	select {
-	case runErr = <-done:
-	case <-time.After(15 * time.Second):
+	case <-done:
+	case <-time.After(20 * time.Second):
 	}
-	plat.mu.Lock()
-	uninstall := plat.uninstall
-	plat.mu.Unlock()
-	if uninstall != nil {
-		performUninstall(*uninstall)
-		return nil
+	if u := sup.uninstallRequested(); u != nil {
+		performUninstall(*u)
 	}
-	return runErr
+	return nil
 }

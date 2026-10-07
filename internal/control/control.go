@@ -25,6 +25,8 @@ import (
 	"github.com/coral-coder/windstream/internal/netx"
 	"github.com/coral-coder/windstream/internal/server"
 	"github.com/coral-coder/windstream/internal/stream"
+
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 // Platform supplies OS integration (Windows implementation lives in winapp).
@@ -53,6 +55,9 @@ type Options struct {
 	// Dev runs with the synthetic source and no router/driver changes, for
 	// development on any OS.
 	Dev bool
+	// LastCrash summarizes why the previous server process died, when the
+	// supervisor restarted it; the dashboard shows it.
+	LastCrash string
 }
 
 // Controller runs everything.
@@ -249,6 +254,7 @@ func (c *Controller) restartHTTPS() {
 	c.httpsCancel, c.httpsDone, c.httpsErr = cancel, done, ""
 	go func() {
 		defer close(done)
+		defer safe.Recover(c.log, "https server")
 		if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
 			c.log.Error("HTTPS server stopped", "error", err)
 			c.httpsMu.Lock()
@@ -272,7 +278,10 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 	c.panel = newPanel(c)
 	panelErr := make(chan error, 1)
-	go func() { panelErr <- c.panel.run(ctx) }()
+	go func() {
+		defer safe.Recover(c.log, "dashboard server")
+		panelErr <- c.panel.run(ctx)
+	}()
 	if c.opts.Platform != nil {
 		c.opts.Platform.PanelReady(c.PanelURL())
 	}
@@ -443,6 +452,9 @@ func (c *Controller) restartStack(ctx context.Context) {
 		cfg.Display.VirtualOwned = true
 	}
 	disp := display.New(cfg.Display, c.log)
+	// Nothing streams yet: undo anything a crashed previous run left behind
+	// (virtual monitor still on, primary display moved).
+	disp.RecoverUnclean()
 	lease := &displayLease{disp: disp, ctx: ctx}
 	webrtcCfg := cfg.WebRTC
 	if st := c.netStatus(); st.PublicIP != "" && !st.CGNAT {

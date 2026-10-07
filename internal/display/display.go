@@ -92,6 +92,17 @@ func (m *Manager) Target() (Target, error) {
 	return m.targetPlatform()
 }
 
+// RecoverUnclean undoes display changes (virtual monitor left on, primary
+// display moved) recorded by a previous run that ended without cleaning up,
+// e.g. a crash mid-stream. Safe to call when nothing needs undoing.
+func (m *Manager) RecoverUnclean() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg.Mode != "test" {
+		m.recoverPlatform()
+	}
+}
+
 // Stop restores the desktop layout and turns the virtual monitor off.
 func (m *Manager) Stop() {
 	m.mu.Lock()

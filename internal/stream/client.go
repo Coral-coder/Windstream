@@ -15,6 +15,7 @@ import (
 
 	"github.com/coral-coder/windstream/internal/input"
 	"github.com/coral-coder/windstream/internal/protocol"
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 // SignalMessage is the JSON envelope exchanged over the signaling WebSocket.
@@ -55,8 +56,12 @@ type Client struct {
 	codecs      []string
 	videoSender *webrtc.RTPSender
 
+	// sigMu serializes offer/answer/candidate handling: pion's
+	// PeerConnection is not safe for concurrent description changes.
+	sigMu sync.Mutex
+
 	limiter    *rate.Limiter
-	dropped    int
+	dropped    atomic.Int64
 	startOnce  sync.Once
 	helloTimer atomic.Pointer[time.Timer]
 	closeOnce  sync.Once
@@ -113,6 +118,7 @@ func (h *Hub) Connect(user, ip string, send func(SignalMessage) error) (*Client,
 		return nil, err
 	}
 	c.helloTimer.Store(time.AfterFunc(helloTimeout, func() {
+		defer safe.Recover(c.log, "hello timeout")
 		if err := c.start(nil); err != nil && !errors.Is(err, errStarted) {
 			c.log.Warn("starting stream failed", "error", err)
 			_ = c.send(SignalMessage{Type: "error", Message: startErrorMessage(err)})
@@ -160,7 +166,7 @@ func (c *Client) setupPeer() error {
 		if err != nil {
 			return fmt.Errorf("add audio track: %w", err)
 		}
-		go drainRTCP(as)
+		go drainRTCP(c.log, as)
 	}
 
 	ordered, unordered := true, false
@@ -175,10 +181,14 @@ func (c *Client) setupPeer() error {
 	}
 	for _, dc := range []*webrtc.DataChannel{control, state} {
 		dc := dc
-		dc.OnMessage(func(msg webrtc.DataChannelMessage) { c.onInput(dc, msg.Data) })
+		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+			defer safe.Recover(c.log, "input message")
+			c.onInput(dc, msg.Data)
+		})
 	}
 
 	pc.OnICECandidate(func(cand *webrtc.ICECandidate) {
+		defer safe.Recover(c.log, "ice candidate")
 		if cand == nil {
 			return
 		}
@@ -188,12 +198,14 @@ func (c *Client) setupPeer() error {
 		}
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		defer safe.Recover(c.log, "connection state")
 		c.log.Info("peer connection state", "state", s.String())
 		switch s {
 		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed:
 			c.Close()
 		case webrtc.PeerConnectionStateDisconnected:
 			time.AfterFunc(15*time.Second, func() {
+				defer safe.Recover(c.log, "disconnect timer")
 				if c.pc.ConnectionState() == webrtc.PeerConnectionStateDisconnected {
 					c.log.Warn("peer stayed disconnected; closing")
 					c.Close()
@@ -205,6 +217,8 @@ func (c *Client) setupPeer() error {
 }
 
 func (c *Client) sendOffer() error {
+	c.sigMu.Lock()
+	defer c.sigMu.Unlock()
 	offer, err := c.pc.CreateOffer(nil)
 	if err != nil {
 		return fmt.Errorf("create offer: %w", err)
@@ -222,11 +236,15 @@ func (c *Client) HandleSignal(m SignalMessage) error {
 		if len(m.SDP) > 64*1024 {
 			return errors.New("answer too large")
 		}
+		c.sigMu.Lock()
+		defer c.sigMu.Unlock()
 		return c.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: m.SDP})
 	case "candidate":
 		if m.Candidate == nil {
 			return nil
 		}
+		c.sigMu.Lock()
+		defer c.sigMu.Unlock()
 		return c.pc.AddICECandidate(*m.Candidate)
 	case "hello":
 		if err := c.start(m.Codecs); err != nil && !errors.Is(err, errStarted) {
@@ -269,15 +287,14 @@ func (c *Client) Close() {
 			}
 		}
 		close(c.done)
-		c.log.Info("client disconnected", "clients", c.hub.ClientCount(), "dropped_input", c.dropped)
+		c.log.Info("client disconnected", "clients", c.hub.ClientCount(), "dropped_input", c.dropped.Load())
 	})
 }
 
 func (c *Client) onInput(dc *webrtc.DataChannel, data []byte) {
 	if !c.limiter.Allow() {
-		c.dropped++
-		if c.dropped == 1 || c.dropped%1000 == 0 {
-			c.log.Warn("input rate limit exceeded; dropping messages", "dropped", c.dropped)
+		if n := c.dropped.Add(1); n == 1 || n%1000 == 0 {
+			c.log.Warn("input rate limit exceeded; dropping messages", "dropped", n)
 		}
 		return
 	}
@@ -312,7 +329,8 @@ func (c *Client) onInput(dc *webrtc.DataChannel, data []byte) {
 
 // drainRTCP reads and discards RTCP from a sender so the interceptors keep
 // running (NACK, receiver reports, TWCC feedback).
-func drainRTCP(s *webrtc.RTPSender) {
+func drainRTCP(log *slog.Logger, s *webrtc.RTPSender) {
+	defer safe.Recover(log, "rtcp reader")
 	buf := make([]byte, 1500)
 	for {
 		if _, _, err := s.Read(buf); err != nil {

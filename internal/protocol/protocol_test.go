@@ -56,3 +56,14 @@ func TestRejects(t *testing.T) {
 		t.Fatalf("sanitize: %q", m.Name)
 	}
 }
+
+// FuzzDecode: no byte sequence from a browser may crash the decoder.
+func FuzzDecode(f *testing.F) {
+	f.Add([]byte{MsgPing, 1, 2, 3, 4})
+	f.Add(EncodeGamepadState(1, GamepadState{Buttons: 5}))
+	f.Add([]byte{MsgKey, 1, 'K', 'e', 'y', 'A'})
+	f.Add([]byte{MsgGamepadConnect, 0, 0xff, 0xfe})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		_, _ = Decode(b)
+	})
+}

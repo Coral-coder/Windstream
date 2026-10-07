@@ -114,6 +114,11 @@ func DiscoverGateway(ctx context.Context) (*Gateway, error) {
 	}
 	ch := make(chan result, 3)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil { // a router answering with malformed XML
+				ch <- result{}
+			}
+		}()
 		cs, _, _ := internetgateway2.NewWANIPConnection2ClientsCtx(ctx)
 		if len(cs) > 0 {
 			ch <- result{cs[0], "WANIPConnection:2"}
@@ -122,6 +127,11 @@ func DiscoverGateway(ctx context.Context) (*Gateway, error) {
 		ch <- result{}
 	}()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil { // a router answering with malformed XML
+				ch <- result{}
+			}
+		}()
 		cs, _, _ := internetgateway2.NewWANIPConnection1ClientsCtx(ctx)
 		if len(cs) > 0 {
 			ch <- result{cs[0], "WANIPConnection:1"}
@@ -130,6 +140,11 @@ func DiscoverGateway(ctx context.Context) (*Gateway, error) {
 		ch <- result{}
 	}()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil { // a router answering with malformed XML
+				ch <- result{}
+			}
+		}()
 		cs, _, _ := internetgateway2.NewWANPPPConnection1ClientsCtx(ctx)
 		if len(cs) > 0 {
 			ch <- result{cs[0], "WANPPPConnection:1"}

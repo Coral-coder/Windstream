@@ -20,6 +20,7 @@ type appOptions struct {
 	Platform  control.Platform
 	OnReady   func(c *control.Controller)
 	OnCrash   func(msg, logPath string) // shown to the user on a fatal crash
+	LastCrash string                    // why the previous worker died, if it did
 }
 
 // runApp starts the controller with logging to <data>/logs/windstream.log
@@ -46,11 +47,15 @@ func runApp(ctx context.Context, o appOptions) error {
 
 	c, err := control.New(control.Options{
 		DataDir: o.DataDir, PanelAddr: o.PanelAddr, Version: version,
-		Log: log, Logs: buf, Platform: o.Platform, Dev: o.Dev,
+		Log: log, Logs: buf, Platform: o.Platform, Dev: o.Dev, LastCrash: o.LastCrash,
 	})
 	if err != nil {
 		log.Error("startup failed", "error", err)
 		return err
+	}
+	if o.LastCrash != "" {
+		log.Warn("restarted automatically after the previous server process crashed", "crash", o.LastCrash,
+			"details", filepath.Join(o.DataDir, "logs", "crash.log"))
 	}
 	if o.OnReady != nil {
 		o.OnReady(c)

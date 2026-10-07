@@ -21,6 +21,8 @@ import (
 	"github.com/coral-coder/windstream/internal/config"
 	"github.com/coral-coder/windstream/internal/netx"
 	"github.com/coral-coder/windstream/web"
+
+	"github.com/coral-coder/windstream/internal/safe"
 )
 
 const panelCookie = "windstream_panel"
@@ -227,6 +229,7 @@ func (p *panel) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	ns := p.c.netStatus()
 	resp["users"] = users
+	resp["last_crash"] = p.c.opts.LastCrash
 	resp["deps"] = p.c.deps.Snapshot()
 	resp["network"] = ns
 	resp["stream"] = p.c.stackStatus()
@@ -552,17 +555,17 @@ func (p *panel) handleUninstall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonOK(w, map[string]bool{"ok": true})
-	go func() {
+	safe.Go(p.c.log, "uninstall", func() {
 		time.Sleep(500 * time.Millisecond)
 		if err := p.c.opts.Platform.Uninstall(req.RemoveData); err != nil {
 			p.c.log.Error("uninstall failed", "error", err)
 		}
-	}()
+	})
 }
 
 func (p *panel) handleQuit(w http.ResponseWriter, r *http.Request) {
 	jsonOK(w, map[string]bool{"ok": true})
 	if p.c.opts.Platform != nil {
-		go func() { time.Sleep(300 * time.Millisecond); p.c.opts.Platform.Quit() }()
+		safe.Go(p.c.log, "quit", func() { time.Sleep(300 * time.Millisecond); p.c.opts.Platform.Quit() })
 	}
 }
