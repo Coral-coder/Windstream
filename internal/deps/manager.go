@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // State of a component.
@@ -159,9 +160,25 @@ func (m *Manager) ensureFFmpeg(ctx context.Context) {
 	}
 	m.run(ctx, "ffmpeg", func(ctx context.Context) error {
 		zipPath := filepath.Join(m.dataDir, "downloads", filepath.Base(FFmpeg.URL))
-		m.log.Info("downloading", "artifact", FFmpeg.Name)
-		if err := Download(ctx, FFmpeg, zipPath, m.progressFn("ffmpeg")); err != nil {
-			return err
+		// Nothing streams without the encoder, so a failed download (PC
+		// still connecting to Wi-Fi at logon, a flaky connection) is retried
+		// until it works rather than left for the user to notice.
+		for wait := 10 * time.Second; ; wait = min(wait*2, 5*time.Minute) {
+			m.log.Info("downloading", "artifact", FFmpeg.Name)
+			err := Download(ctx, FFmpeg, zipPath, m.progressFn("ffmpeg"))
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return err
+			}
+			m.log.Warn("ffmpeg download failed; retrying", "error", err, "in", wait)
+			m.set("ffmpeg", StateError, 0, fmt.Sprintf("download failed (%s); retrying in %s", shorten(err.Error(), 120), wait))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(wait):
+			}
 		}
 		m.set("ffmpeg", StateInstalling, 1, "extracting")
 		if _, err := ExtractMatching(zipPath, "/bin/ffmpeg.exe", binDir); err != nil {
@@ -177,4 +194,11 @@ func (m *Manager) ensureFFmpeg(ctx context.Context) {
 		m.log.Info("installed", "artifact", FFmpeg.Name, "path", exe)
 		return nil
 	})
+}
+
+func shorten(s string, n int) string {
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }

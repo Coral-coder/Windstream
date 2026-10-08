@@ -141,10 +141,45 @@ func TestCrashSummary(t *testing.T) {
 	if got := crashSummary(nil, -1073741819); !strings.Contains(got, "0xc0000005") {
 		t.Errorf("native crash summary %q", got)
 	}
-	tb := &tailBuffer{max: 4}
-	tb.Write([]byte("abcdef"))
-	tb.Write([]byte("gh"))
-	if string(tb.bytes()) != "efgh" {
-		t.Errorf("tail = %q", tb.bytes())
+	tb := &tailBuffer{max: 4, headMax: 3}
+	tb.Write([]byte("abcdefghi"))
+	tb.Write([]byte("jk"))
+	if got := string(tb.bytes()); got != "abc\n[... output trimmed ...]\nhijk" {
+		t.Errorf("head+tail = %q", got)
+	}
+}
+
+func TestNewerVersion(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"1.0.11", "1.0.9", true},
+		{"1.0.9", "1.0.11", false},
+		{"1.0.11", "1.0.11", false},
+		{"1.1", "1.0.99", true},
+		{"v2.0.0", "1.9.9", true},
+		{"1.0.0", "1.0", false},
+		{"dev", "1.0.0", false},
+		{"1.0.0", "dev", false},
+		{"", "1.0.0", false},
+		{"20250417", "1.0.12", false}, // an all-digit commit hash is not a release
+		{"1.0.12", "20250417", false},
+	}
+	for _, c := range cases {
+		if got := newerVersion(c.a, c.b); got != c.want {
+			t.Errorf("newerVersion(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestSupervisorReportsRepeatedFailures(t *testing.T) {
+	s, _, _ := scripted(t, "panic", "panic", "panic", "panic", "panic", "quit")
+	var calls atomic.Int32
+	var got string
+	s.onRepeatedFailure = func(summary string) { calls.Add(1); got = summary }
+	s.run(context.Background(), func() {})
+	if calls.Load() != 1 || !strings.Contains(got, "panic: boom") {
+		t.Fatalf("repeated-failure notice: calls=%d summary=%q", calls.Load(), got)
 	}
 }

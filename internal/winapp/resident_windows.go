@@ -117,9 +117,12 @@ func Resident() error {
 
 	ename, _ := windows.UTF16PtrFromString(quitEvent)
 	ev, err := windows.CreateEvent(nil, 1, 0, ename)
-	if err != nil {
+	if ev == 0 {
 		return err
 	}
+	// The event can outlive a previous run (e.g. held by a worker that has
+	// not exited yet) and may still be set from that run's quit.
+	_ = windows.ResetEvent(ev)
 	defer windows.CloseHandle(ev)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -133,8 +136,17 @@ func Resident() error {
 		quit()
 	}()
 
+	// The server starts first and does not depend on the tray: at logon the
+	// taskbar may not be ready, and a tray failure must never mean no
+	// server.
 	sup := newSupervisor()
 	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sup.run(ctx, quit)
+		systray.Quit()
+	}()
+
 	onReady := func() {
 		systray.SetIcon(trayIcon)
 		systray.SetTitle("Windstream")
@@ -144,13 +156,7 @@ func Resident() error {
 		mLogs := systray.AddMenuItem("Open logs folder", "Show Windstream's log files")
 		systray.AddSeparator()
 		mQuit := systray.AddMenuItem("Quit Windstream", "Stop streaming and close")
-		systray.SetOnTapped(func() { openURL(PanelURL()) })
-
-		go func() {
-			defer close(done)
-			defer systray.Quit()
-			sup.run(ctx, quit)
-		}()
+		systray.SetOnTapped(openPanel)
 		go func() {
 			t := time.NewTicker(3 * time.Second)
 			defer t.Stop()
@@ -159,12 +165,12 @@ func Resident() error {
 				case <-ctx.Done():
 					return
 				case <-mOpen.ClickedCh:
-					openURL(PanelURL())
+					openPanel()
 				case <-mLink.ClickedCh:
 					if st := readWorkerStatus(); st.Link != "" {
 						openURL(st.Link)
 					} else {
-						openURL(PanelURL())
+						openPanel()
 					}
 				case <-mLogs.ClickedCh:
 					_ = os.MkdirAll(logsDir(), 0o700)
@@ -177,13 +183,24 @@ func Resident() error {
 			}
 		}()
 	}
-	systray.Run(onReady, func() { quit() })
-	select {
-	case <-done:
-	case <-time.After(20 * time.Second):
-	}
+	systray.Run(onReady, func() {})
+	// The tray is gone: either we are quitting, or it could not be created
+	// (e.g. no taskbar yet). Either way keep supervising until told to quit.
+	<-done
 	if u := sup.uninstallRequested(); u != nil {
-		performUninstall(*u)
+		performUninstall(*u, false)
 	}
 	return nil
+}
+
+// openPanel opens the dashboard, but only if it is Windstream answering at
+// the saved address; otherwise it explains instead of sending the user to
+// whatever else might be listening there.
+func openPanel() {
+	url := PanelURL()
+	if runningVersion(url) != "" {
+		openURL(url)
+		return
+	}
+	go messageBox("Windstream is still starting (or restarting after a problem). Try again in a few seconds.\n\nIf this keeps happening, use \"Open logs folder\" in the tray menu.", mbOK|mbIconInfo)
 }

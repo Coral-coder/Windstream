@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,8 +68,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.log.Info("display: test pattern mode (no capture)")
 	}
 	if len(m.cfg.Launch) > 0 {
-		cmd := exec.Command(m.cfg.Launch[0], m.cfg.Launch[1:]...)
-		configureLaunch(cmd)
+		cmd := launchCommand(m.cfg.Launch)
 		if err := cmd.Start(); err != nil {
 			m.log.Warn("launch failed", "command", strings.Join(m.cfg.Launch, " "), "error", err)
 		} else {

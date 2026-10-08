@@ -13,7 +13,7 @@ const ui = {
 
 const state = {
   ws: null, pc: null, control: null, motion: null, caps: null,
-  reconnectDelay: 1000, active: false, held: new Set(), pads: new Map(),
+  reconnectDelay: 1000, reconnectTimer: 0, active: false, held: new Set(), buttons: new Set(), pads: new Map(),
   rtt: null, lastStats: null, lastHeartbeat: 0, showStats: false, pointerLocked: false, fatalError: null,
   codec: null, padTimer: null,
 };
@@ -120,7 +120,11 @@ function showStream() {
 
 // ---------- signaling + WebRTC ----------
 function connect() {
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = 0;
   if (!state.active) return;
+  if (state.ws) { const old = state.ws; state.ws = null; old.close(); }
+  teardownPeer();
   state.fatalError = null;
   setStatus('Connecting…');
   const ws = new WebSocket(`wss://${location.host}/api/signal`);
@@ -129,10 +133,14 @@ function connect() {
     const codecs = await codecsReady;
     if (state.ws === ws) signal({ type: 'hello', codecs });
   };
-  ws.onmessage = async (ev) => {
+  // Handle signaling messages strictly in order: a candidate must not be
+  // applied while the offer before it is still being processed.
+  let chain = Promise.resolve();
+  ws.onmessage = (ev) => {
+    if (state.ws !== ws) return; // a newer connection replaced this one
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    try { await handleSignal(msg); } catch (e) { console.error('signal', msg.type, e); setStatus(`Error: ${e.message}`); }
+    chain = chain.then(() => handleSignal(msg)).catch((e) => { console.error('signal', msg.type, e); setStatus(`Error: ${e.message}`); });
   };
   ws.onclose = (ev) => {
     if (state.ws !== ws) return;
@@ -149,7 +157,8 @@ function connect() {
     }
     if (!state.active) return;
     setStatus(`Disconnected. Reconnecting in ${Math.round(state.reconnectDelay / 1000)}s…`);
-    setTimeout(connect, state.reconnectDelay);
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = setTimeout(connect, state.reconnectDelay);
     state.reconnectDelay = Math.min(state.reconnectDelay * 2, 15000);
   };
   ws.onerror = () => {};
@@ -170,13 +179,19 @@ async function handleSignal(msg) {
       if (msg.codec) state.codec = msg.codec;
       if (!state.pc) createPeer([]);
       await state.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+      for (const c of state.pendingCands || []) await state.pc.addIceCandidate(c).catch((e) => console.warn('candidate', e));
+      state.pendingCands = [];
       const answer = await state.pc.createAnswer();
       await state.pc.setLocalDescription(answer);
       signal({ type: 'answer', sdp: answer.sdp });
       break;
     }
     case 'candidate':
-      if (state.pc && msg.candidate) await state.pc.addIceCandidate(msg.candidate).catch(() => {});
+      if (!state.pc || !msg.candidate) break;
+      // Keep candidates that arrive before the offer and apply them once
+      // it has been set, instead of losing them.
+      if (!state.pc.remoteDescription) { (state.pendingCands ||= []).push(msg.candidate); break; }
+      await state.pc.addIceCandidate(msg.candidate).catch((e) => console.warn('candidate', e));
       break;
     case 'error':
       state.fatalError = msg.message;
@@ -244,6 +259,8 @@ function teardownPeer() {
 }
 
 function teardown() {
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = 0;
   teardownPeer();
   if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
 }
@@ -344,30 +361,42 @@ function pollPads(now) {
 
 // ---------- keyboard ----------
 const PASSTHROUGH_KEYS = new Set(['F11']);
+function sendKey(code, down) {
+  const c = enc.encode(code);
+  const buf = new Uint8Array(2 + c.length);
+  buf[0] = MSG.KEY; buf[1] = down ? 1 : 0; buf.set(c, 2);
+  sendControl(buf);
+}
 function keyEvent(ev, down) {
+  // A release is always delivered for a key the PC saw go down, wherever
+  // focus has moved since, or the key would stay stuck on the PC.
+  if (!down) {
+    if (!state.held.delete(ev.code)) return;
+    sendKey(ev.code, false);
+    ev.preventDefault();
+    return;
+  }
   if (!state.active || !state.caps || !state.caps.keyboard) return;
   if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
   if (PASSTHROUGH_KEYS.has(ev.code)) return;
-  if (down && ev.repeat) { ev.preventDefault(); return; }
-  if (ev.code === 'Escape' && !state.pointerLocked && !down) return; // let Escape leave fullscreen
-  if (down) state.held.add(ev.code); else state.held.delete(ev.code);
-  const code = enc.encode(ev.code);
-  const buf = new Uint8Array(2 + code.length);
-  buf[0] = MSG.KEY; buf[1] = down ? 1 : 0; buf.set(code, 2);
-  sendControl(buf);
+  if (ev.repeat) { ev.preventDefault(); return; }
+  if (ev.code === 'Escape' && !state.pointerLocked) return; // let Escape leave fullscreen
+  state.held.add(ev.code);
+  sendKey(ev.code, true);
   ev.preventDefault();
 }
 window.addEventListener('keydown', (ev) => keyEvent(ev, true));
 window.addEventListener('keyup', (ev) => keyEvent(ev, false));
-window.addEventListener('blur', () => {
-  for (const code of state.held) {
-    const c = enc.encode(code);
-    const buf = new Uint8Array(2 + c.length);
-    buf[0] = MSG.KEY; buf[1] = 0; buf.set(c, 2);
-    sendControl(buf);
-  }
+// Releases everything held: the browser stops sending us key-ups and
+// mouse-ups once the window loses focus or the pointer is unlocked.
+function releaseAll() {
+  for (const code of state.held) sendKey(code, false);
   state.held.clear();
-});
+  for (const b of state.buttons) sendControl(new Uint8Array([MSG.MOUSE_BUTTON, b, 0]));
+  state.buttons.clear();
+}
+window.addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
 
 // ---------- mouse ----------
 ui.stage.addEventListener('click', () => {
@@ -378,6 +407,10 @@ ui.stage.addEventListener('click', () => {
 document.addEventListener('pointerlockchange', () => {
   state.pointerLocked = document.pointerLockElement === ui.stage;
   ui.stage.classList.toggle('show-cursor', !state.pointerLocked);
+  if (!state.pointerLocked) {
+    // Escape (which unlocks) never reaches the page, so no key-up follows.
+    releaseAll();
+  }
 });
 ui.stage.classList.add('show-cursor');
 
@@ -396,12 +429,17 @@ function sendMove(ev) {
 }
 ui.stage.addEventListener(RAW_POINTER ? 'pointerrawupdate' : 'mousemove', sendMove);
 function mouseButton(ev, down) {
-  if (!state.pointerLocked) return;
+  if (down) {
+    if (!state.pointerLocked) return;
+    state.buttons.add(ev.button);
+  } else if (!state.buttons.delete(ev.button)) {
+    return;
+  }
   ev.preventDefault();
   sendControl(new Uint8Array([MSG.MOUSE_BUTTON, ev.button, down ? 1 : 0]));
 }
 ui.stage.addEventListener('mousedown', (ev) => mouseButton(ev, true));
-ui.stage.addEventListener('mouseup', (ev) => mouseButton(ev, false));
+window.addEventListener('mouseup', (ev) => mouseButton(ev, false));
 ui.stage.addEventListener('contextmenu', (ev) => ev.preventDefault());
 ui.stage.addEventListener('wheel', (ev) => {
   if (!state.pointerLocked) return;

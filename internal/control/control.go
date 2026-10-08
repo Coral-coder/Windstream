@@ -5,6 +5,8 @@ package control
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,6 +16,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coral-coder/windstream/internal/auth"
@@ -68,6 +71,9 @@ type Controller struct {
 
 	mu  sync.Mutex
 	cfg *config.Config
+	// configNotice explains a settings file that had to be repaired at
+	// startup; the dashboard shows it.
+	configNotice string
 
 	auth     *auth.Authenticator
 	sessions *auth.SessionStore
@@ -87,13 +93,18 @@ type Controller struct {
 	panel     *panel
 	panelAddr string
 
-	httpsMu     sync.Mutex
+	httpsMu     sync.Mutex // serializes HTTPS server restarts
 	httpsCancel context.CancelFunc
 	httpsDone   chan struct{}
-	httpsErr    string
+	httpsErr    atomic.Pointer[string] // separate: the server goroutine sets it
+
+	// identity is a random token the HTTPS server publishes, so the app can
+	// check that its public link reaches this PC and not something else.
+	identity string
 
 	netMu     sync.Mutex
 	netCancel context.CancelFunc
+	netDone   chan struct{}
 	runCtx    context.Context
 }
 
@@ -104,24 +115,49 @@ func New(opts Options) (*Controller, error) {
 	}
 	c := &Controller{opts: opts, log: opts.Log, cfgPath: filepath.Join(opts.DataDir, "windstream.toml"),
 		restartReq: make(chan struct{}, 1)}
+	var tok [16]byte
+	if _, err := rand.Read(tok[:]); err != nil {
+		return nil, err
+	}
+	c.identity = hex.EncodeToString(tok[:])
+	def := config.AppDefaults()
+	if opts.Dev {
+		def.Display.Mode = "test"
+		def.Audio.Backend = "test"
+		def.Network.UPnP = false
+		def.Video.Encoder = "x264"
+		def.Video.FPS = 30
+		def.Video.BitrateKbps = 4000
+		def.Display.Width, def.Display.Height = 1280, 720
+	}
 	cfg, err := config.Load(c.cfgPath)
-	if errors.Is(err, os.ErrNotExist) {
-		def := config.AppDefaults()
-		if opts.Dev {
-			def.Display.Mode = "test"
-			def.Audio.Backend = "test"
-			def.Network.UPnP = false
-			def.Video.Encoder = "x264"
-			def.Video.FPS = 30
-			def.Video.BitrateKbps = 4000
-			def.Display.Width, def.Display.Height = 1280, 720
-		}
+	switch {
+	case errors.Is(err, os.ErrNotExist):
 		cfg = &def
 		if err := cfg.Save(c.cfgPath); err != nil {
 			return nil, err
 		}
-	} else if err != nil {
-		return nil, fmt.Errorf("config %s: %w", c.cfgPath, err)
+	case err != nil:
+		// Never refuse to start over the settings file: keep a copy of it,
+		// repair what is broken (accounts and valid sections survive) and
+		// say so on the dashboard.
+		data, rerr := os.ReadFile(c.cfgPath)
+		if rerr != nil {
+			return nil, fmt.Errorf("config %s: %w", c.cfgPath, rerr)
+		}
+		backup := c.cfgPath + ".broken-" + time.Now().Format("20060102-150405")
+		_ = os.WriteFile(backup, data, 0o600)
+		repaired, what := config.Repair(data, def)
+		cfg = &repaired
+		if serr := cfg.Save(c.cfgPath); serr != nil {
+			return nil, serr
+		}
+		c.configNotice = fmt.Sprintf("The settings file had a problem (%s). %s The original was saved as %s.",
+			trimErr(err), what, filepath.Base(backup))
+		opts.Log.Error("settings file repaired", "error", err, "changes", what, "backup", backup)
+	}
+	if len(cfg.UnknownKeys) > 0 {
+		opts.Log.Warn("ignoring settings this version does not know (from a newer version?)", "keys", cfg.UnknownKeys)
 	}
 	c.cfg = cfg
 	c.auth = auth.NewAuthenticator(nil, true)
@@ -240,9 +276,10 @@ func (c *Controller) restartHTTPS() {
 	cfg := c.Config()
 	srv, err := server.New(&cfg, nil, c.log, server.Options{
 		Auth: c.auth, Sessions: c.sessions, Limiter: c.limiter, GetCertificate: c.tls.GetCertificate,
+		Identity: c.identity,
 	})
 	if err != nil {
-		c.httpsErr = err.Error()
+		c.setHTTPSErr(err.Error())
 		return
 	}
 	c.stackMu.Lock()
@@ -251,23 +288,25 @@ func (c *Controller) restartHTTPS() {
 	c.stackMu.Unlock()
 	ctx, cancel := context.WithCancel(c.runCtx)
 	done := make(chan struct{})
-	c.httpsCancel, c.httpsDone, c.httpsErr = cancel, done, ""
+	c.httpsCancel, c.httpsDone = cancel, done
+	c.setHTTPSErr("")
 	go func() {
 		defer close(done)
 		defer safe.Recover(c.log, "https server")
 		if err := srv.Run(ctx); err != nil && ctx.Err() == nil {
 			c.log.Error("HTTPS server stopped", "error", err)
-			c.httpsMu.Lock()
-			c.httpsErr = err.Error()
-			c.httpsMu.Unlock()
+			c.setHTTPSErr(err.Error())
 		}
 	}()
 }
 
+func (c *Controller) setHTTPSErr(s string) { c.httpsErr.Store(&s) }
+
 func (c *Controller) httpsError() string {
-	c.httpsMu.Lock()
-	defer c.httpsMu.Unlock()
-	return c.httpsErr
+	if p := c.httpsErr.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // Run blocks until ctx is cancelled.
@@ -277,11 +316,27 @@ func (c *Controller) Run(ctx context.Context) error {
 		return err
 	}
 	c.panel = newPanel(c)
+	ln, err := c.panel.listen()
+	if err != nil && c.opts.PanelAddr == "" {
+		// Something grabbed the port since it was checked: move once more.
+		c.log.Warn("dashboard port was taken at the last moment; moving", "error", err)
+		cfg := c.Config()
+		if p, perr := netx.PickPort(netx.LoopbackTCPFree, []int{47334, 47335, 47336, 47337, 47338, 47339}, cfg.ListenPort(), cfg.WebRTC.TCPPort); perr == nil {
+			c.panelAddr = fmt.Sprintf("127.0.0.1:%d", p)
+			_ = c.update(func(cf *config.Config) error { cf.Server.PanelPort = p; return nil })
+			ln, err = c.panel.listen()
+		}
+	}
+	if err != nil {
+		return err
+	}
 	panelErr := make(chan error, 1)
 	go func() {
 		defer safe.Recover(c.log, "dashboard server")
-		panelErr <- c.panel.run(ctx)
+		panelErr <- c.panel.serve(ctx, ln)
 	}()
+	// Published only now that the dashboard is listening, so the launcher
+	// and tray never open an address nothing (or something else) answers.
 	if c.opts.Platform != nil {
 		c.opts.Platform.PanelReady(c.PanelURL())
 	}
@@ -333,16 +388,41 @@ func (c *Controller) restartNetwork() {
 	defer c.netMu.Unlock()
 	if c.netCancel != nil {
 		c.netCancel()
+		// Let the old manager remove its router mappings before the new one
+		// adds its own (they may be the same ports).
+		select {
+		case <-c.netDone:
+		case <-time.After(15 * time.Second):
+		}
 	}
 	cfg := c.Config()
 	ctx, cancel := context.WithCancel(c.runCtx)
-	c.netCancel = cancel
-	c.net = netx.NewManager(c.log, c.ports(), cfg.Network.UPnP && !c.opts.Dev, cfg.Network.CustomDomain, func(st netx.Status) {
+	done := make(chan struct{})
+	c.netCancel, c.netDone = cancel, done
+	var last netx.Status
+	n := netx.NewManager(c.log, c.ports(), cfg.Network.UPnP && !c.opts.Dev, cfg.Network.CustomDomain, func(st netx.Status) {
 		c.tls.SetHost(st.Hostname)
+		// Let's Encrypt validates on port 443 only; anywhere else it can
+		// only fail (and repeated failures get the address rate limited).
+		// A failed self-check with the router mapped is most likely the
+		// router not looping back to itself, which does not stop the link
+		// (or Let's Encrypt) from working from outside.
+		c.tls.SetACME(st.HTTPSExternal == 443 && !st.CGNAT && (st.PublicCheck == "ok" || st.UPnP == "mapped"))
 		c.tls.Warm(ctx)
-		c.requestRestart()
+		// The streaming engine only cares about the public IP.
+		if st.PublicIP != last.PublicIP || st.CGNAT != last.CGNAT {
+			c.requestRestart()
+		}
+		last = st
 	})
-	safego(c.log, "network", func() { c.net.Run(ctx) })
+	n.SetVerifier(func(ctx context.Context, url string) error {
+		return netx.CheckIdentity(ctx, url, c.identity)
+	})
+	c.net = n
+	safego(c.log, "network", func() {
+		defer close(done)
+		n.Run(ctx)
+	})
 }
 
 func (c *Controller) netStatus() netx.Status {
@@ -550,13 +630,7 @@ func trimErr(err error) string {
 }
 
 // Link is the address people play from (public if available, else LAN).
-func (c *Controller) Link() string {
-	st := c.netStatus()
-	if st.PublicURL != "" {
-		return st.PublicURL
-	}
-	return st.LANURL
-}
+func (c *Controller) Link() string { return c.netStatus().Link() }
 
 // TrayStatus is a one-line status for the tray tooltip.
 func (c *Controller) TrayStatus() string {

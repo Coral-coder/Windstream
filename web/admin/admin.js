@@ -222,12 +222,17 @@ function renderDash(s) {
   const warn = $('#net-warn');
   let w = '';
   if (n.cgnat) w = "Your internet provider shares your public IP with other customers (CGNAT), so this PC can't be reached directly from outside. It works on your home network; for outside access ask your ISP for a public IP.";
+  else if (n.public_check === 'failed' && n.upnp === 'mapped') w = `Your router opened the ports, but this PC can't reach its own internet link (${n.public_url}). Many routers can't loop back to themselves, so it should still work from outside your home: try it on your phone with Wi-Fi off. At home, use ${n.lan_url}.`;
+  else if (n.public_check === 'failed') w = `Your internet link (${n.public_url}) doesn't reach this PC yet: ${n.public_check_detail || 'something else answered'}. Until it does, the link below only works on your home network. Add the port forwards shown under "Internet access" (Windstream re-checks every few minutes).`;
   else if (n.upnp && n.upnp !== 'mapped' && n.upnp !== 'disabled') w = 'Automatic router setup failed. Add the port forwards shown under "Internet access" so the link works outside your home.';
   else if (!n.public_url && !s.dev) w = n.checked ? "Couldn't detect your public address. The home-network link still works." : 'Still detecting your public address…';
   warn.textContent = w; warn.classList.toggle('hidden', !w);
   const crash = $('#crash-note');
   crash.textContent = s.last_crash ? `Windstream hit a problem and restarted itself automatically (${s.last_crash}). Use "Download logs" under Troubleshooting to send the details.` : '';
   crash.classList.toggle('hidden', !s.last_crash);
+  const cnote = $('#config-note');
+  cnote.textContent = s.config_notice || '';
+  cnote.classList.toggle('hidden', !s.config_notice);
 
   renderDeps(s.deps || []);
   const st = s.stream || {};
@@ -243,7 +248,9 @@ function renderDash(s) {
   $('#pubip').textContent = n.public_ip || (n.checked ? "Couldn't detect" : '…');
   $('#forward-why').textContent = n.upnp === 'disabled'
     ? 'Automatic router setup is off. To use the link outside your home, add these port forwards in your router:'
-    : "Your router didn't accept automatic setup. Add these port forwards in its settings:";
+    : n.upnp === 'mapped'
+      ? "If the link doesn't work from outside your home, check that your router has these port forwards (and that it is the only router between this PC and the internet):"
+      : "Your router didn't accept automatic setup. Add these port forwards in its settings:";
   $('#hostname').textContent = n.hostname || '—';
   if (s.settings) $('#ports').textContent = `HTTPS ${s.settings.https_port}/TCP · media ${s.settings.media_port}/UDP`;
   $('#forward').classList.toggle('hidden', !(n.forward && n.forward.length));

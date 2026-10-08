@@ -173,6 +173,9 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	if len(cfg.UnknownKeys) > 0 {
+		fmt.Fprintln(os.Stderr, "warning: ignoring unknown config keys:", strings.Join(cfg.UnknownKeys, ", "))
+	}
 	if len(cfg.Users) == 0 {
 		return errors.New("no [[users]] configured")
 	}

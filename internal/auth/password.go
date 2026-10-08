@@ -77,9 +77,16 @@ func VerifyPassword(encoded, password string) (bool, error) {
 	if err != nil || len(want) < 16 {
 		return false, ErrMalformedHash
 	}
+	verifySlots <- struct{}{}
 	got := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(want)))
+	<-verifySlots
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
+
+// verifySlots bounds concurrent verifications: each one takes 64 MB and a
+// core for a moment, and a burst of logins (from many addresses at once)
+// must not be able to exhaust the PC's memory while it is running a game.
+var verifySlots = make(chan struct{}, 2)
 
 // BurnVerify spends the same CPU time as a real verification. It is called
 // when a login names an unknown user so response timing does not reveal which

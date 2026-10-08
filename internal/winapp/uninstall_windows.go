@@ -47,8 +47,8 @@ func Uninstall(args []string) error {
 		}
 		removeData = messageBox("Also delete your Windstream accounts and settings?\n\nChoose No to keep them for a later reinstall.", mbYesNo|mbIconQuestion) == idYes
 	}
-	stopResident(20 * time.Second)
-	performUninstall(removeData)
+	stopResident(25 * time.Second)
+	performUninstall(removeData, has("--quiet"))
 	return nil
 }
 
@@ -56,7 +56,7 @@ func Uninstall(args []string) error {
 // installed exe (from Apps & features, or from the dashboard after the app
 // has shut down); files that are still in use, like this exe, are removed
 // by Windows at the next restart.
-func performUninstall(removeData bool) {
+func performUninstall(removeData, quiet bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	netx.RemoveMappings(ctx, mappedPorts())
 	cancel()
@@ -87,7 +87,9 @@ func performUninstall(removeData bool) {
 	if pending > 0 {
 		msg += "\n\nA few files that were in use will be deleted when you restart the PC."
 	}
-	messageBox(msg, mbOK|mbIconInfo)
+	if !quiet {
+		messageBox(msg, mbOK|mbIconInfo)
+	}
 }
 
 // removeTree deletes dir; anything locked is scheduled for deletion at the

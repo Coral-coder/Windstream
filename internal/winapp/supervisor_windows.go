@@ -44,7 +44,12 @@ func readWorkerStatus() workerStatus {
 
 func newSupervisor() *supervisor {
 	return &supervisor{logDir: logsDir(), start: startWorker,
-		grace: 12 * time.Second, minBackoff: time.Second, maxBackoff: 30 * time.Second}
+		grace: 12 * time.Second, minBackoff: time.Second, maxBackoff: 30 * time.Second,
+		onRepeatedFailure: func(summary string) {
+			go messageBox("Windstream keeps failing to start:\n\n"+summary+
+				"\n\nIt will keep retrying. The details are in "+filepath.Join(logsDir(), "crash.log")+
+				" (tray menu → Open logs folder).", mbOK|mbIconWarning)
+		}}
 }
 
 func (s *supervisor) tooltip() string {
@@ -92,7 +97,9 @@ func startWorker(env []string, out io.Writer) (workerProc, error) {
 		return nil, err
 	}
 	if h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid)); err == nil {
-		_ = windows.AssignProcessToJobObject(job, h)
+		if aerr := windows.AssignProcessToJobObject(job, h); aerr != nil {
+			fmt.Fprintf(out, "supervisor: could not put the server in a job object (%v); leftover encoders may need a restart to clear\n", aerr)
+		}
 		windows.CloseHandle(h)
 	}
 	return &jobProc{cmd: cmd, job: job}, nil
@@ -108,7 +115,10 @@ func (p *jobProc) Wait() int {
 	return code
 }
 
-func (p *jobProc) Kill() { _ = windows.TerminateJobObject(p.job, 1) }
+func (p *jobProc) Kill() {
+	_ = windows.TerminateJobObject(p.job, 1)
+	_ = p.cmd.Process.Kill() // in case it never made it into the job
+}
 
 // newKillOnCloseJob creates a job object whose processes are all terminated
 // when its last handle closes.

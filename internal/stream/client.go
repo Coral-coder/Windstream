@@ -60,6 +60,14 @@ type Client struct {
 	// PeerConnection is not safe for concurrent description changes.
 	sigMu sync.Mutex
 
+	// Our ICE candidates are held back until the offer has been sent: a
+	// browser drops candidates that arrive before the offer, and host
+	// candidates are gathered almost instantly, so without this the
+	// connection sometimes never completes.
+	candMu    sync.Mutex
+	offerSent bool
+	pendCands []webrtc.ICECandidateInit
+
 	limiter    *rate.Limiter
 	dropped    atomic.Int64
 	startOnce  sync.Once
@@ -93,24 +101,38 @@ func (h *Hub) Connect(user, ip string, send func(SignalMessage) error) (*Client,
 	caps := InputCaps{}
 	if h.cfg.InputEnabled {
 		inj, err := input.New(h.cfg.Input, c.log)
-		if err != nil {
-			c.log.Warn("input injection unavailable; stream is view-only", "error", err)
+		if inj == nil {
+			inj = input.Noop{}
 		}
 		c.inj = inj
-		if err == nil {
+		switch {
+		case err == nil:
 			caps = InputCaps{Gamepads: h.cfg.Input.Gamepads, Keyboard: h.cfg.Input.Keyboard,
 				Mouse: h.cfg.Input.Mouse, MaxGamepads: h.cfg.Input.MaxGamepads}
+		case errors.Is(err, input.ErrUnsupported):
+			c.log.Warn("input injection unavailable; stream is view-only", "error", err)
+		default:
+			// Only controllers are unavailable (e.g. the ViGEmBus driver is
+			// missing): keyboard and mouse still work.
+			c.log.Warn("controllers unavailable; keyboard and mouse still work", "error", err)
+			caps = InputCaps{Keyboard: h.cfg.Input.Keyboard, Mouse: h.cfg.Input.Mouse}
 		}
 	} else {
 		c.inj = input.Noop{}
 	}
 
-	if err := h.addClient(c); err != nil {
+	// Build the peer connection before registering, so a concurrent
+	// Hub.Close always finds a complete client to tear down.
+	if err := c.setupPeer(); err != nil {
+		if c.pc != nil {
+			_ = c.pc.Close()
+		}
 		_ = c.inj.Close()
 		return nil, err
 	}
-	if err := c.setupPeer(); err != nil {
-		c.Close()
+	if err := h.addClient(c); err != nil {
+		_ = c.pc.Close()
+		_ = c.inj.Close()
 		return nil, err
 	}
 	if err := send(SignalMessage{Type: "config", ICEServers: h.iceServers, Input: &caps}); err != nil {
@@ -193,6 +215,12 @@ func (c *Client) setupPeer() error {
 			return
 		}
 		init := cand.ToJSON()
+		c.candMu.Lock()
+		defer c.candMu.Unlock()
+		if !c.offerSent {
+			c.pendCands = append(c.pendCands, init)
+			return
+		}
 		if err := c.send(SignalMessage{Type: "candidate", Candidate: &init}); err != nil {
 			c.log.Debug("send candidate", "error", err)
 		}
@@ -226,7 +254,19 @@ func (c *Client) sendOffer() error {
 	if err := c.pc.SetLocalDescription(offer); err != nil {
 		return fmt.Errorf("set local description: %w", err)
 	}
-	return c.send(SignalMessage{Type: "offer", SDP: offer.SDP, Codec: c.Codec()})
+	if err := c.send(SignalMessage{Type: "offer", SDP: offer.SDP, Codec: c.Codec()}); err != nil {
+		return err
+	}
+	c.candMu.Lock()
+	defer c.candMu.Unlock()
+	c.offerSent = true
+	for i := range c.pendCands {
+		if err := c.send(SignalMessage{Type: "candidate", Candidate: &c.pendCands[i]}); err != nil {
+			c.log.Debug("send candidate", "error", err)
+		}
+	}
+	c.pendCands = nil
+	return nil
 }
 
 // HandleSignal processes a message from the client's signaling channel.
@@ -292,16 +332,21 @@ func (c *Client) Close() {
 }
 
 func (c *Client) onInput(dc *webrtc.DataChannel, data []byte) {
-	if !c.limiter.Allow() {
-		if n := c.dropped.Add(1); n == 1 || n%1000 == 0 {
-			c.log.Warn("input rate limit exceeded; dropping messages", "dropped", n)
-		}
-		return
-	}
 	m, err := protocol.Decode(data)
 	if err != nil {
 		c.log.Debug("bad input message", "error", err, "len", len(data))
 		return
+	}
+	// Only high-rate motion is rate limited (an 8 kHz gaming mouse can
+	// exceed it): a dropped key or button release would leave it stuck.
+	switch m.Type {
+	case protocol.MsgMouseMove, protocol.MsgMouseWheel, protocol.MsgGamepadState:
+		if !c.limiter.Allow() {
+			if n := c.dropped.Add(1); n == 1 || n%1000 == 0 {
+				c.log.Warn("input rate limit exceeded; dropping motion messages", "dropped", n)
+			}
+			return
+		}
 	}
 	switch m.Type {
 	case protocol.MsgPing:

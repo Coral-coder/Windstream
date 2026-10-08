@@ -44,6 +44,9 @@ type supervisor struct {
 	// grace is how long a worker gets to shut down cleanly on quit.
 	grace                  time.Duration
 	minBackoff, maxBackoff time.Duration
+	// onRepeatedFailure is told (once) when the worker keeps dying within
+	// seconds of starting, so the user is not left with a silent loop.
+	onRepeatedFailure func(summary string)
 
 	mu         sync.Mutex
 	running    bool
@@ -69,6 +72,7 @@ func (s *supervisor) state() (running bool, lastCrash string, when time.Time) {
 // or uninstall.
 func (s *supervisor) run(ctx context.Context, quit func()) {
 	backoff := s.minBackoff
+	fastFailures, notified := 0, false
 	for ctx.Err() == nil {
 		began := time.Now()
 		code, out, err := s.runWorker(ctx)
@@ -90,7 +94,17 @@ func (s *supervisor) run(ctx context.Context, quit func()) {
 			quit()
 			return
 		default:
-			s.recordCrash(crashSummary(out, code), out, code)
+			summary := crashSummary(out, code)
+			s.recordCrash(summary, out, code)
+			if time.Since(began) < 30*time.Second {
+				fastFailures++
+			} else {
+				fastFailures = 0
+			}
+			if fastFailures >= 4 && !notified && s.onRepeatedFailure != nil {
+				notified = true
+				s.onRepeatedFailure(summary)
+			}
 		}
 		if time.Since(began) > time.Minute {
 			backoff = s.minBackoff // it ran fine for a while: restart promptly
@@ -108,7 +122,7 @@ func (s *supervisor) run(ctx context.Context, quit func()) {
 
 // runWorker starts one worker and waits for it.
 func (s *supervisor) runWorker(ctx context.Context) (int, []byte, error) {
-	out := &tailBuffer{max: 256 << 10}
+	out := &tailBuffer{max: 256 << 10, headMax: 16 << 10}
 	env := os.Environ()
 	if _, crash, when := s.state(); crash != "" {
 		env = append(env, LastCrashEnv+"="+when.Format("Jan 2 15:04:05")+": "+crash)
@@ -186,25 +200,41 @@ func crashSummary(out []byte, code int) string {
 	return fmt.Sprintf("server process exited unexpectedly (code %#x)", uint32(code))
 }
 
-// tailBuffer keeps the last max bytes written to it.
+// tailBuffer keeps the first headMax bytes and the last max bytes written
+// to it: a Go crash report starts with the panic message and is followed by
+// every goroutine's stack, which can be far longer than the tail kept.
 type tailBuffer struct {
-	mu  sync.Mutex
-	buf []byte
-	max int
+	mu      sync.Mutex
+	head    []byte
+	buf     []byte
+	max     int
+	headMax int
+	dropped bool
 }
 
 func (t *tailBuffer) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	n := len(p)
+	if room := t.headMax - len(t.head); room > 0 {
+		k := min(room, len(p))
+		t.head = append(t.head, p[:k]...)
+		p = p[k:]
+	}
 	t.buf = append(t.buf, p...)
 	if over := len(t.buf) - t.max; over > 0 {
 		t.buf = append(t.buf[:0:0], t.buf[over:]...)
+		t.dropped = true
 	}
-	return len(p), nil
+	return n, nil
 }
 
 func (t *tailBuffer) bytes() []byte {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return append([]byte(nil), t.buf...)
+	out := append([]byte(nil), t.head...)
+	if t.dropped {
+		out = append(out, "\n[... output trimmed ...]\n"...)
+	}
+	return append(out, t.buf...)
 }

@@ -5,6 +5,7 @@ package winapp
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 
 	"golang.org/x/sys/windows/registry"
@@ -60,9 +61,28 @@ func Launch() error {
 	if err != nil {
 		return err
 	}
+	running := runningVersion(panelURL)
+	// Never downgrade: an old copy of Windstream.exe (e.g. an earlier
+	// download) opens the newer installed version instead of replacing it.
+	// An older version cannot read settings written by a newer one.
+	newest := running
+	if iv := installedVersion(); newest == "" || newerVersion(iv, newest) {
+		newest = iv
+	}
+	if newerVersion(newest, Version) && !samePath(self, InstalledExe) {
+		if _, err := os.Stat(InstalledExe); err == nil || running != "" {
+			messageBox(fmt.Sprintf("This is an older copy of Windstream (%s). Windstream %s is already installed, so that is being opened instead.\n\nYou can delete this older file.", Version, newest), mbOK|mbIconInfo)
+			if running != "" {
+				openURL(panelURL)
+				return nil
+			}
+			return exec.Command(InstalledExe).Start()
+		}
+		// The installed exe is gone: reinstall from this copy.
+	}
 	// Already running: just open it, unless this exe is a different version
 	// (then fall through and upgrade in place).
-	if v := runningVersion(panelURL); v != "" && (v == Version || samePath(self, InstalledExe)) {
+	if running != "" && (running == Version || samePath(self, InstalledExe)) {
 		openURL(panelURL)
 		return nil
 	}
@@ -95,6 +115,18 @@ func Launch() error {
 		}
 	}
 	return fmt.Errorf("Windstream was installed but did not start. The log is in %s\\logs", DataDir)
+}
+
+// installedVersion is the version recorded when Windstream was installed,
+// or "" if it is not installed.
+func installedVersion() string {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, uninstallKey, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer k.Close()
+	v, _, _ := k.GetStringValue("DisplayVersion")
+	return v
 }
 
 // Version is set by the main package.

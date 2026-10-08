@@ -247,6 +247,21 @@ func (m *Manager) stopPlatform() {
 	m.saveState()
 }
 
-func configureLaunch(cmd *exec.Cmd) {
+// launchCommand starts the configured app (Steam Big Picture) through
+// Explorer. Explorer hands it to the user's desktop shell, so it runs with
+// the user's normal (non-administrator) rights and outside Windstream's
+// process group: restarting or quitting Windstream never takes the game
+// with it, and a tampered Steam path cannot gain administrator rights.
+// A protocol link such as steam://open/bigpicture is opened directly.
+func launchCommand(launch []string) *exec.Cmd {
+	target := launch[0]
+	for _, a := range launch[1:] {
+		if strings.Contains(a, "://") {
+			target = a
+			break
+		}
+	}
+	cmd := exec.Command(filepath.Join(os.Getenv("WINDIR"), "explorer.exe"), target)
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	return cmd
 }

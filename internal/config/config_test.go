@@ -33,10 +33,53 @@ func TestParseMinimal(t *testing.T) {
 	}
 }
 
-func TestRejectsUnknownKeys(t *testing.T) {
-	_, err := Parse([]byte(minimal + "\n[video]\nbitrate = 5\n"))
-	if err == nil || !strings.Contains(err.Error(), "unknown config keys") {
-		t.Fatalf("expected unknown key error, got %v", err)
+func TestUnknownKeysAreIgnored(t *testing.T) {
+	// A setting from a newer version (or a typo) must never stop Windstream
+	// from starting; it is reported instead.
+	cfg, err := Parse([]byte(minimal + "\n[video]\nbitrate = 5\nfuture_option = true\n"))
+	if err != nil {
+		t.Fatalf("unknown keys rejected: %v", err)
+	}
+	if strings.Join(cfg.UnknownKeys, ",") != "video.bitrate,video.future_option" {
+		t.Fatalf("unknown keys = %v", cfg.UnknownKeys)
+	}
+}
+
+func TestRepair(t *testing.T) {
+	def := AppDefaults()
+	user := `
+[[users]]
+name = "alice"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+totp_secret = "JBSWY3DPEHPK3PXP"
+`
+	// An invalid value in one section: only that section is reset, the
+	// account and the other settings survive.
+	bad := user + "\n[video]\ncodec = \"vp8\"\nfps = 90\n[network]\ncustom_domain = \"games.example.com\"\n"
+	if _, err := Parse([]byte(bad)); err == nil {
+		t.Fatal("invalid file accepted")
+	}
+	cfg, what := Repair([]byte(bad), def)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("repaired config invalid: %v", err)
+	}
+	if len(cfg.Users) != 1 || cfg.Users[0].Name != "alice" {
+		t.Fatalf("account lost: %+v", cfg.Users)
+	}
+	if cfg.Network.CustomDomain != "games.example.com" {
+		t.Errorf("valid section was reset: %+v", cfg.Network)
+	}
+	if cfg.Video.Codec != "auto" || !strings.Contains(what, "video") {
+		t.Errorf("video not reset (codec %q, %q)", cfg.Video.Codec, what)
+	}
+	// Not TOML at all: defaults.
+	cfg, what = Repair([]byte("this is [not toml"), def)
+	if cfg.Validate() != nil || len(cfg.Users) != 0 || what == "" {
+		t.Errorf("garbage not reset to defaults: %q", what)
+	}
+	// A valid file comes back unchanged.
+	if cfg, what := Repair([]byte(user), def); what != "" || len(cfg.Users) != 1 {
+		t.Errorf("valid file changed: %q", what)
 	}
 }
 
@@ -91,5 +134,59 @@ func TestVideoCodec(t *testing.T) {
 	_, err = Parse([]byte(minimal + "\n[video]\ncodec = \"vp8\"\n"))
 	if err == nil || !strings.Contains(err.Error(), "video.codec") {
 		t.Errorf("vp8 accepted: %v", err)
+	}
+}
+
+func TestRepairKeepsAccountsAfterTypeError(t *testing.T) {
+	data := []byte(`
+[video]
+fps = "sixty"
+
+[[users]]
+name = "alice"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$aGFzaA"
+totp_secret = "JBSWY3DPEHPK3PXP"
+
+[[users]]
+name = "alice"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$b3RoZXI"
+totp_secret = "JBSWY3DPEHPK3PXP"
+
+[[users]]
+name = "bob"
+password_hash = "plain"
+`)
+	cfg, what := Repair(data, AppDefaults())
+	if len(cfg.Users) != 1 || cfg.Users[0].Name != "alice" || !strings.Contains(cfg.Users[0].PasswordHash, "aGFzaA") {
+		t.Fatalf("users = %+v", cfg.Users)
+	}
+	if !strings.Contains(what, "accounts were kept") {
+		t.Fatalf("what = %q", what)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRepairDropsDuplicateUsers(t *testing.T) {
+	def := AppDefaults()
+	def.Users = nil
+	data := []byte(`
+[[users]]
+name = "alice"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$aGFzaA"
+totp_secret = "JBSWY3DPEHPK3PXP"
+
+[[users]]
+name = "alice"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=2$c2FsdA$b3RoZXI"
+totp_secret = "JBSWY3DPEHPK3PXP"
+`)
+	cfg, what := Repair(data, def)
+	if len(cfg.Users) != 1 || cfg.Validate() != nil {
+		t.Fatalf("users = %+v, err = %v", cfg.Users, cfg.Validate())
+	}
+	if !strings.Contains(what, "Removed 1") {
+		t.Fatalf("what = %q", what)
 	}
 }

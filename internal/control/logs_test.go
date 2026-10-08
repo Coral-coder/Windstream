@@ -85,3 +85,42 @@ func values(m map[string]string) []string {
 	}
 	return out
 }
+
+func TestStartsWithBrokenSettings(t *testing.T) {
+	dir := t.TempDir()
+	const bad = `
+[[users]]
+name = "player"
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+totp_secret = "JBSWY3DPEHPK3PXP"
+
+[video]
+codec = "vp9"
+setting_from_the_future = 1
+`
+	if err := os.WriteFile(filepath.Join(dir, "windstream.toml"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := New(Options{DataDir: dir, Dev: true, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Logs: NewLogBuffer(10)})
+	if err != nil {
+		t.Fatalf("refused to start: %v", err)
+	}
+	cfg := c.Config()
+	if len(cfg.Users) != 1 || cfg.Users[0].Name != "player" {
+		t.Fatalf("account lost: %+v", cfg.Users)
+	}
+	if cfg.Video.Codec != "auto" {
+		t.Errorf("invalid codec not reset: %q", cfg.Video.Codec)
+	}
+	if !strings.Contains(c.configNotice, "video") || !strings.Contains(c.configNotice, ".broken-") {
+		t.Errorf("notice = %q", c.configNotice)
+	}
+	backups, _ := filepath.Glob(filepath.Join(dir, "windstream.toml.broken-*"))
+	if len(backups) != 1 {
+		t.Errorf("backup not kept: %v", backups)
+	}
+	// The repaired file loads cleanly next time.
+	if _, err := New(Options{DataDir: dir, Dev: true, Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Logs: NewLogBuffer(10)}); err != nil {
+		t.Fatal(err)
+	}
+}

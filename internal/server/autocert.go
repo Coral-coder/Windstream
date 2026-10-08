@@ -30,9 +30,16 @@ type AutoTLS struct {
 
 	mu       sync.RWMutex
 	host     string
+	acmeOn   bool // the public HTTPS port is 443, so Let's Encrypt can validate
+	haveCert bool // a public certificate was obtained (it is cached)
 	self     *tls.Certificate
 	lastFail time.Time
 }
+
+// acmeRetry is how long to serve the self-signed certificate after a failed
+// attempt before asking Let's Encrypt again: every handshake would otherwise
+// retry, and repeated failures get the address rate limited.
+const acmeRetry = 10 * time.Minute
 
 // NewAutoTLS stores ACME account/certificates and the self-signed pair in dir.
 func NewAutoTLS(dir, email string, log *slog.Logger) (*AutoTLS, error) {
@@ -57,8 +64,43 @@ func NewAutoTLS(dir, email string, log *slog.Logger) (*AutoTLS, error) {
 // SetHost changes the public hostname (when the public IP changes).
 func (a *AutoTLS) SetHost(host string) {
 	a.mu.Lock()
-	a.host = strings.ToLower(host)
+	if h := strings.ToLower(host); h != a.host {
+		a.host, a.haveCert, a.lastFail = h, false, time.Time{}
+	}
 	a.mu.Unlock()
+}
+
+// SetACME enables or disables obtaining a public certificate.
+func (a *AutoTLS) SetACME(on bool) {
+	a.mu.Lock()
+	a.acmeOn = on
+	a.mu.Unlock()
+}
+
+// tryACME reports whether a handshake for the public host should go to
+// Let's Encrypt (or its cache).
+func (a *AutoTLS) tryACME(hello *tls.ClientHelloInfo) bool {
+	for _, p := range hello.SupportedProtos {
+		if p == "acme-tls/1" {
+			return true // a validation request from Let's Encrypt itself
+		}
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.haveCert || (a.acmeOn && time.Since(a.lastFail) > acmeRetry)
+}
+
+func (a *AutoTLS) noteResult(err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err == nil {
+		a.haveCert = true
+		return
+	}
+	if time.Since(a.lastFail) > acmeRetry {
+		a.log.Warn("public certificate unavailable; serving self-signed (is the HTTPS port reachable from the internet on 443?)", "host", a.host, "error", err)
+	}
+	a.lastFail = time.Now()
 }
 
 // Host returns the public hostname.
@@ -71,23 +113,18 @@ func (a *AutoTLS) Host() string {
 // GetCertificate implements tls.Config.GetCertificate.
 func (a *AutoTLS) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	host := a.Host()
-	if host != "" && strings.EqualFold(hello.ServerName, host) {
+	if host != "" && strings.EqualFold(hello.ServerName, host) && a.tryACME(hello) {
 		cert, err := a.acme.GetCertificate(hello)
-		if err == nil {
-			return cert, nil
-		}
 		// Do not fall back during the ACME challenge itself.
 		for _, p := range hello.SupportedProtos {
 			if p == "acme-tls/1" {
-				return nil, err
+				return cert, err
 			}
 		}
-		a.mu.Lock()
-		if time.Since(a.lastFail) > 10*time.Minute {
-			a.log.Warn("public certificate unavailable; serving self-signed (is the HTTPS port reachable from the internet on 443?)", "host", host, "error", err)
-			a.lastFail = time.Now()
+		a.noteResult(err)
+		if err == nil {
+			return cert, nil
 		}
-		a.mu.Unlock()
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -98,23 +135,31 @@ func (a *AutoTLS) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 // visitor does not wait for issuance.
 func (a *AutoTLS) Warm(ctx context.Context) {
 	host := a.Host()
-	if host == "" {
+	a.mu.RLock()
+	on := a.acmeOn
+	a.mu.RUnlock()
+	if host == "" || !on {
 		return
 	}
 	go func() {
 		defer safe.Recover(a.log, "certificate warm-up")
 		// Issuance needs the router mapping to be live; retry a few times.
-		for i := 0; i < 5 && ctx.Err() == nil; i++ {
-			if _, err := a.acme.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err == nil {
+		for i := 0; i < 3 && ctx.Err() == nil; i++ {
+			_, err := a.acme.GetCertificate(&tls.ClientHelloInfo{ServerName: host})
+			if a.Host() != host {
+				return // the address changed meanwhile
+			}
+			a.noteResult(err)
+			if err == nil {
 				a.log.Info("public HTTPS certificate ready", "host", host)
 				return
-			} else if i == 4 {
+			} else if i == 2 {
 				a.log.Warn("could not obtain public certificate", "host", host, "error", err)
 			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(30*(i+1)) * time.Second):
+			case <-time.After(time.Duration(60*(i+1)) * time.Second):
 			}
 		}
 	}()

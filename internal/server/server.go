@@ -22,6 +22,7 @@ import (
 
 	"github.com/coral-coder/windstream/internal/auth"
 	"github.com/coral-coder/windstream/internal/config"
+	"github.com/coral-coder/windstream/internal/netx"
 	"github.com/coral-coder/windstream/internal/stream"
 	"github.com/coral-coder/windstream/web"
 
@@ -42,6 +43,7 @@ type Server struct {
 	tlsCfg   *tls.Config
 	acme     *autocert.Manager
 	getCert  func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	identity string
 	origins  map[string]bool
 }
 
@@ -53,6 +55,9 @@ type Options struct {
 	Limiter  *auth.Limiter
 	// GetCertificate overrides the [tls] config section (used by AutoTLS).
 	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	// Identity is served at netx.IdentityPath so the app can confirm that
+	// its public link reaches this server.
+	Identity string
 }
 
 // New wires the handlers and TLS configuration. hub may be nil and set later.
@@ -78,6 +83,7 @@ func New(cfg *config.Config, hub *stream.Hub, log *slog.Logger, opts ...Options)
 		sessions: o.Sessions,
 		limiter:  o.Limiter,
 		getCert:  o.GetCertificate,
+		identity: o.Identity,
 		origins:  make(map[string]bool),
 	}
 	s.hub.Store(hub)
@@ -234,6 +240,13 @@ func (s *Server) routes() http.Handler {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	if s.identity != "" {
+		mux.HandleFunc("GET "+netx.IdentityPath, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write([]byte(s.identity))
+		})
+	}
 	mux.HandleFunc("POST /api/login", s.handleLogin)
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/me", s.handleMe)

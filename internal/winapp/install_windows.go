@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -41,7 +42,13 @@ func Install(version, userSID string) error {
 	if err != nil {
 		return err
 	}
-	stopResident(15 * time.Second)
+	stopResident(25 * time.Second) // the worker gets 12 s to restore the display, plus margin
+	// An uninstall that has not been followed by a reboot yet left our
+	// files queued for deletion at boot; cancel that, or Windows would
+	// delete the fresh install on the next restart.
+	if n := cancelPendingDeletes(InstallDir, DataDir); n > 0 {
+		fmt.Fprintf(os.Stderr, "cancelled %d pending deletions from a previous uninstall\n", n)
+	}
 
 	if err := os.MkdirAll(InstallDir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", InstallDir, err)
@@ -136,6 +143,11 @@ func secureDataDir(userSID string) error {
 		return err
 	}
 	logSDDL := "D:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" // BU = Builtin Users: read & execute
+	if self, err := currentUserSID(); err == nil && userSID != "" && userSID != self {
+		// A standard user's logon task runs without admin rights and must
+		// be able to write its own logs.
+		logSDDL += "(A;OICI;FA;;;" + userSID + ")"
+	}
 	if lsd, err := windows.SecurityDescriptorFromString(logSDDL); err == nil {
 		if ldacl, _, err := lsd.DACL(); err == nil {
 			_ = windows.SetNamedSecurityInfo(logs, windows.SE_FILE_OBJECT,
@@ -209,7 +221,7 @@ func writeUninstallEntry(version string) error {
 		"DisplayIcon":          InstalledExe + ",0",
 		"InstallLocation":      InstallDir,
 		"UninstallString":      `"` + InstalledExe + `" --uninstall`,
-		"QuietUninstallString": `"` + InstalledExe + `" --uninstall --keep-data`,
+		"QuietUninstallString": `"` + InstalledExe + `" --uninstall --keep-data --quiet`,
 		"URLInfoAbout":         "https://github.com/coral-coder/windstream",
 	} {
 		if err := k.SetStringValue(name, val); err != nil {
@@ -246,4 +258,84 @@ func stopResident(timeout time.Duration) {
 	} else {
 		_ = windows.ReleaseMutex(m)
 	}
+}
+
+var procRegSetValueExW = windows.NewLazySystemDLL("advapi32.dll").NewProc("RegSetValueExW")
+
+// cancelPendingDeletes removes entries under any of dirs from the
+// boot-time PendingFileRenameOperations list (MoveFileEx with
+// MOVEFILE_DELAY_UNTIL_REBOOT). It returns how many it removed.
+func cancelPendingDeletes(dirs ...string) int {
+	const keyPath = `SYSTEM\CurrentControlSet\Control\Session Manager`
+	const value = "PendingFileRenameOperations"
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, keyPath, registry.QUERY_VALUE|registry.SET_VALUE)
+	if err != nil {
+		return 0
+	}
+	defer k.Close()
+	n, typ, err := k.GetValue(value, nil)
+	if err != nil || typ != registry.MULTI_SZ || n == 0 {
+		return 0
+	}
+	buf := make([]byte, n)
+	if _, _, err := k.GetValue(value, buf); err != nil {
+		return 0
+	}
+	u16 := make([]uint16, len(buf)/2)
+	for i := range u16 {
+		u16[i] = uint16(buf[2*i]) | uint16(buf[2*i+1])<<8
+	}
+	// The list is pairs of (source, destination) strings; an empty
+	// destination means delete. It ends with an empty source.
+	var tokens []string
+	start := 0
+	for i, c := range u16 {
+		if c == 0 {
+			tokens = append(tokens, windows.UTF16ToString(u16[start:i]))
+			start = i + 1
+		}
+	}
+	var kept []string
+	removed := 0
+	for i := 0; i+1 < len(tokens); i += 2 {
+		src, dst := tokens[i], tokens[i+1]
+		if src == "" {
+			break
+		}
+		path := strings.TrimPrefix(strings.TrimPrefix(src, `\??\`), "*")
+		ours := false
+		for _, d := range dirs {
+			if strings.HasPrefix(strings.ToLower(path), strings.ToLower(d)) {
+				ours = true
+			}
+		}
+		if ours && dst == "" {
+			removed++
+			continue
+		}
+		kept = append(kept, src, dst)
+	}
+	if removed == 0 {
+		return 0
+	}
+	if len(kept) == 0 {
+		_ = k.DeleteValue(value)
+		return removed
+	}
+	var out []uint16
+	for _, s := range kept {
+		w, _ := windows.UTF16FromString(s) // includes the terminating NUL
+		out = append(out, w...)
+	}
+	out = append(out, 0)
+	raw := make([]byte, 2*len(out))
+	for i, c := range out {
+		raw[2*i], raw[2*i+1] = byte(c), byte(c>>8)
+	}
+	name, _ := windows.UTF16PtrFromString(value)
+	if r, _, _ := procRegSetValueExW.Call(uintptr(k), uintptr(unsafe.Pointer(name)), 0, uintptr(windows.REG_MULTI_SZ),
+		uintptr(unsafe.Pointer(&raw[0])), uintptr(len(raw))); r != 0 {
+		return 0
+	}
+	return removed
 }

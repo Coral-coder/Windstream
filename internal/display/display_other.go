@@ -14,7 +14,7 @@ func (m *Manager) targetPlatform() (Target, error)     { return Target{}, ErrUns
 func (m *Manager) stopPlatform()                       {}
 func (m *Manager) recoverPlatform()                    {}
 
-func configureLaunch(*exec.Cmd) {}
+func launchCommand(launch []string) *exec.Cmd { return exec.Command(launch[0], launch[1:]...) }
 
 // List enumerates outputs (Windows only).
 func List() ([]Output, error) { return nil, ErrUnsupported }

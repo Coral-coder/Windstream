@@ -43,6 +43,10 @@ type Config struct {
 	Input   Input   `toml:"input"`
 	Log     Log     `toml:"log"`
 	Network Network `toml:"network"`
+
+	// UnknownKeys lists settings in the file this version does not know,
+	// e.g. written by a newer Windstream. They are ignored, not fatal.
+	UnknownKeys []string `toml:"-"`
 }
 
 // Network configures automatic internet reachability (desktop app).
@@ -282,24 +286,126 @@ func Load(path string) (*Config, error) {
 }
 
 // Parse decodes TOML bytes over the defaults and validates the result.
-// Unknown keys are rejected so typos never silently disable a setting.
+// Keys this version does not know (a typo, or a setting from a newer
+// version) are recorded in UnknownKeys rather than rejected, so a settings
+// file never stops Windstream from starting.
 func Parse(data []byte) (*Config, error) {
-	cfg := Default()
-	md, err := toml.Decode(string(data), &cfg)
+	cfg, err := decode(data, Default())
 	if err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		keys := make([]string, 0, len(undecoded))
-		for _, k := range undecoded {
-			keys = append(keys, k.String())
-		}
-		return nil, fmt.Errorf("unknown config keys: %s", strings.Join(keys, ", "))
+		return nil, err
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func decode(data []byte, base Config) (Config, error) {
+	cfg := base
+	cfg.Users = append([]User(nil), base.Users...)
+	md, err := toml.Decode(string(data), &cfg)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	for _, k := range md.Undecoded() {
+		cfg.UnknownKeys = append(cfg.UnknownKeys, k.String())
+	}
+	return cfg, nil
+}
+
+// Repair salvages as much as possible of a settings file that fails to
+// load. If it parses, every section that is valid is kept (accounts in
+// particular) and only the sections that make it invalid are reset to
+// defaults; if it does not parse at all, defaults are used. It returns the
+// repaired configuration and a short description of what was reset.
+func Repair(data []byte, defaults Config) (Config, string) {
+	cfg, err := decode(data, defaults)
+	if err != nil {
+		// A syntax error loses everything, but a wrong type in some
+		// setting does not stop the accounts from being read on their own.
+		var only struct {
+			Users []User `toml:"users"`
+		}
+		cfg = defaults
+		what := "It could not be read, so all settings and accounts were reset."
+		if _, uerr := toml.Decode(string(data), &only); uerr == nil && len(only.Users) > 0 {
+			cfg.Users = validUsers(only.Users, defaults.Auth.RequireTOTP)
+			what = "It could not be read, so all settings were reset; accounts were kept."
+		}
+		return cfg, what
+	}
+	if cfg.Validate() == nil {
+		return cfg, ""
+	}
+	// Drop accounts that are themselves invalid (or repeated), keep the rest.
+	users := validUsers(cfg.Users, cfg.Auth.RequireTOTP)
+	dropped := len(cfg.Users) - len(users)
+	cfg.Users = users
+	sections := []struct {
+		name  string
+		reset func()
+	}{
+		{"video", func() { cfg.Video = defaults.Video }},
+		{"display", func() { cfg.Display = defaults.Display }},
+		{"audio", func() { cfg.Audio = defaults.Audio }},
+		{"input", func() { cfg.Input = defaults.Input }},
+		{"webrtc", func() { cfg.WebRTC = defaults.WebRTC }},
+		{"network", func() { cfg.Network = defaults.Network }},
+		{"log", func() { cfg.Log = defaults.Log }},
+		{"server", func() { cfg.Server = defaults.Server }},
+		{"tls", func() { cfg.TLS = defaults.TLS }},
+		{"auth", func() { cfg.Auth = defaults.Auth }},
+	}
+	var reset []string
+	for _, sec := range sections {
+		if cfg.Validate() == nil {
+			break
+		}
+		probe := cfg
+		sec.reset()
+		if cfg.Validate() != nil && errCount(cfg) >= errCount(probe) {
+			cfg = probe // resetting this section did not help: keep it
+			continue
+		}
+		reset = append(reset, sec.name)
+	}
+	if cfg.Validate() != nil {
+		users := cfg.Users
+		cfg = defaults
+		cfg.Users = users
+		reset = []string{"all settings except accounts"}
+	}
+	var what []string
+	if len(reset) > 0 {
+		what = append(what, "Reset to defaults: "+strings.Join(reset, ", ")+".")
+	}
+	if dropped > 0 {
+		what = append(what, fmt.Sprintf("Removed %d invalid account(s).", dropped))
+	}
+	return cfg, strings.Join(what, " ")
+}
+
+// validUsers returns the usable accounts, the first of each name.
+func validUsers(in []User, requireTOTP bool) []User {
+	var out []User
+	seen := map[string]bool{}
+	for _, u := range in {
+		if u.Name == "" || seen[u.Name] || !strings.HasPrefix(u.PasswordHash, "$argon2id$") ||
+			(requireTOTP && u.TOTPSecret == "") {
+			continue
+		}
+		seen[u.Name] = true
+		out = append(out, u)
+	}
+	return out
+}
+
+func errCount(c Config) int {
+	err := c.Validate()
+	if err == nil {
+		return 0
+	}
+	return strings.Count(err.Error(), "\n") + 1
 }
 
 var validEncoders = map[string]bool{"auto": true, "nvenc": true, "amf": true, "qsv": true, "x264": true}

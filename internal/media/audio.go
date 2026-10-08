@@ -67,8 +67,8 @@ func BuildAudioArgs(cfg AudioConfig, pcm *PCMFormat) []string {
 
 // RunAudio captures audio and calls onSample for every Opus packet. It
 // returns nil only on cancellation.
-func RunAudio(ctx context.Context, cfg AudioConfig, log *slog.Logger, onSample func(AudioSample)) error {
-	ctx, cancel := context.WithCancel(ctx)
+func RunAudio(parent context.Context, cfg AudioConfig, log *slog.Logger, onSample func(AudioSample)) error {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	if cfg.Backend != "wasapi" {
 		return runAudioFFmpeg(ctx, cfg, nil, nil, log, onSample)
@@ -92,15 +92,23 @@ func RunAudio(ctx context.Context, cfg AudioConfig, log *slog.Logger, onSample f
 			}
 		}()
 	})
+	if parent.Err() != nil {
+		err = nil
+	}
 	select {
 	case <-started:
-		if ffErr := <-errCh; ffErr != nil {
-			return ffErr
+		// Capture has ended (its pipe is closed), so the encoder is ending
+		// too: wait for it so a restart never overlaps it.
+		cancel()
+		ffErr := <-errCh
+		if err != nil {
+			return err // capture failed first (e.g. the device was unplugged)
 		}
+		if parent.Err() != nil {
+			return nil
+		}
+		return ffErr
 	default:
-	}
-	if ctx.Err() != nil {
-		return nil
 	}
 	return err
 }
@@ -122,7 +130,8 @@ func runAudioFFmpeg(ctx context.Context, cfg AudioConfig, pcm *PCMFormat, stdin 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
-	go logStderr(stderr, log.With("pipeline", "audio"))
+	stderrDone := make(chan struct{})
+	go func() { logStderr(stderr, log.With("pipeline", "audio")); close(stderrDone) }()
 
 	ogg := NewOggReader(bufio.NewReaderSize(stdout, 16*1024))
 	var readErr error
@@ -139,6 +148,7 @@ func runAudioFFmpeg(ctx context.Context, cfg AudioConfig, pcm *PCMFormat, stdin 
 		}
 		onSample(AudioSample{Data: pkt, Duration: OpusPacketDuration(pkt)})
 	}
+	waitForReader(stderrDone) // Wait closes the pipe: read ffmpeg's last words first
 	waitErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return nil
@@ -150,6 +160,15 @@ func runAudioFFmpeg(ctx context.Context, cfg AudioConfig, pcm *PCMFormat, stdin 
 		return fmt.Errorf("ffmpeg exited: %w", waitErr)
 	}
 	return errors.New("ffmpeg exited unexpectedly")
+}
+
+// waitForReader waits (briefly) for a pipe reader to see EOF. exec.Cmd.Wait
+// closes the pipe, and ffmpeg prints why it failed as it exits.
+func waitForReader(done <-chan struct{}) {
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
 }
 
 // logStderr forwards ffmpeg's warnings to the log, at most 20 lines per 10

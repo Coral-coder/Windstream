@@ -30,6 +30,22 @@ type Status struct {
 	LANURL        string   `json:"lan_url"`        //
 	Forward       []string `json:"forward"`        // manual port-forward instructions if UPnP failed
 	Checked       string   `json:"checked"`
+	// PublicCheck is "ok" when a request to PublicURL reached this
+	// Windstream, "failed" when something else answered (or nothing did),
+	// and "" when it was not checked.
+	PublicCheck       string `json:"public_check"`
+	PublicCheckDetail string `json:"public_check_detail,omitempty"`
+}
+
+// Link is the address to hand out: the public one unless it is known not to
+// reach this PC, otherwise the home-network one. With the router ports
+// opened, a failed check most likely means the router cannot loop back to
+// its own public address, which only affects devices inside the home.
+func (s Status) Link() string {
+	if s.PublicURL != "" && (s.PublicCheck != "failed" || s.UPnP == "mapped") {
+		return s.PublicURL
+	}
+	return s.LANURL
 }
 
 // Manager keeps the router mappings and public address current.
@@ -40,11 +56,14 @@ type Manager struct {
 	customDomain string
 	stunServer   string
 	onChange     func(Status)
+	// verify checks that a public URL reaches this server.
+	verify func(ctx context.Context, url string) error
 
-	mu     sync.Mutex
-	status Status
-	gw     *Gateway
-	mapped []mapping
+	refreshMu sync.Mutex // one Refresh at a time
+	mu        sync.Mutex
+	status    Status
+	gw        *Gateway
+	mapped    []mapping
 }
 
 type mapping struct {
@@ -65,6 +84,12 @@ func NewManager(log *slog.Logger, ports Ports, useUPnP bool, customDomain string
 	return m
 }
 
+// SetVerifier sets the check run against the public URL on every refresh.
+// Call it before Run.
+func (m *Manager) SetVerifier(verify func(ctx context.Context, url string) error) {
+	m.verify = verify
+}
+
 // Status returns the latest status.
 func (m *Manager) Status() Status {
 	m.mu.Lock()
@@ -75,15 +100,23 @@ func (m *Manager) Status() Status {
 // Run refreshes every 20 minutes (renewing UPnP leases) until ctx ends, then
 // removes the mappings it created.
 func (m *Manager) Run(ctx context.Context) {
+	defer m.unmapAll()
 	m.Refresh(ctx)
-	t := time.NewTicker(20 * time.Minute)
-	defer t.Stop()
+	failures := 0
 	for {
+		// While the public link does not work yet, look again soon: the
+		// user may be adding port forwards right now.
+		wait := 20 * time.Minute
+		if m.Status().PublicCheck == "failed" && failures < 10 {
+			failures++
+			wait = 2 * time.Minute
+		} else if m.Status().PublicCheck != "failed" {
+			failures = 0
+		}
 		select {
 		case <-ctx.Done():
-			m.unmapAll()
 			return
-		case <-t.C:
+		case <-time.After(wait):
 			m.Refresh(ctx)
 		}
 	}
@@ -91,6 +124,11 @@ func (m *Manager) Run(ctx context.Context) {
 
 // Refresh re-detects addresses and re-applies port mappings.
 func (m *Manager) Refresh(ctx context.Context) {
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
 	st := Status{UPnP: "disabled", HTTPSExternal: m.ports.HTTPSExternal, Checked: time.Now().Format(time.RFC3339)}
 	if lan := LANIP(); lan != nil {
 		st.LANIP = lan.String()
@@ -142,9 +180,21 @@ func (m *Manager) Refresh(ctx context.Context) {
 			st.PublicURL += fmt.Sprintf(":%d", st.HTTPSExternal)
 		}
 	}
-	if st.UPnP != "mapped" {
+	if st.PublicURL != "" && m.verify != nil {
+		vctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		if err := m.verify(vctx, st.PublicURL); err != nil {
+			st.PublicCheck, st.PublicCheckDetail = "failed", err.Error()
+			if m.log != nil {
+				m.log.Warn("the public link does not reach this PC from here", "url", st.PublicURL, "error", err)
+			}
+		} else {
+			st.PublicCheck = "ok"
+		}
+		cancel()
+	}
+	if st.UPnP != "mapped" || st.PublicCheck == "failed" {
 		st.Forward = []string{
-			fmt.Sprintf("TCP %d → %s port %d (HTTPS)", m.ports.HTTPSExternal, st.LANIP, m.ports.HTTPSInternal),
+			fmt.Sprintf("TCP %d → %s port %d (HTTPS)", st.HTTPSExternal, st.LANIP, m.ports.HTTPSInternal),
 			fmt.Sprintf("UDP %d → %s port %d (video, audio, input)", m.ports.MediaUDP, st.LANIP, m.ports.MediaUDP),
 		}
 	}
@@ -153,7 +203,8 @@ func (m *Manager) Refresh(ctx context.Context) {
 	prev := m.status
 	m.status = st
 	m.mu.Unlock()
-	if prev.PublicIP != st.PublicIP || prev.Hostname != st.Hostname || prev.HTTPSExternal != st.HTTPSExternal {
+	if prev.PublicIP != st.PublicIP || prev.Hostname != st.Hostname || prev.HTTPSExternal != st.HTTPSExternal ||
+		prev.PublicCheck != st.PublicCheck {
 		m.log.Info("network", "public_ip", st.PublicIP, "hostname", st.Hostname, "upnp", st.UPnP, "detail", st.UPnPDetail)
 		if m.onChange != nil {
 			m.onChange(st)
@@ -166,6 +217,18 @@ func (m *Manager) mapAll(ctx context.Context, gw *Gateway) (uint16, error) {
 	m.mu.Lock()
 	m.gw = gw
 	m.mu.Unlock()
+	// Every mapping is recorded the moment it exists, so a later failure
+	// (or quitting mid-way) never leaves one behind on the router.
+	record := func(proto string, port uint16) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		for _, mp := range m.mapped {
+			if mp.proto == proto && mp.ext == port {
+				return
+			}
+		}
+		m.mapped = append(m.mapped, mapping{proto, port})
+	}
 	ext := m.ports.HTTPSExternal
 	err := gw.Map(ctx, "TCP", ext, m.ports.HTTPSInternal, "Windstream HTTPS")
 	if err != nil && ext != m.ports.HTTPSInternal {
@@ -179,19 +242,16 @@ func (m *Manager) mapAll(ctx context.Context, gw *Gateway) (uint16, error) {
 	if err != nil {
 		return 0, fmt.Errorf("map TCP %d: %w", ext, err)
 	}
-	maps := []mapping{{"TCP", ext}}
+	record("TCP", ext)
 	if err := gw.Map(ctx, "UDP", m.ports.MediaUDP, m.ports.MediaUDP, "Windstream media"); err != nil {
 		return 0, fmt.Errorf("map UDP %d: %w", m.ports.MediaUDP, err)
 	}
-	maps = append(maps, mapping{"UDP", m.ports.MediaUDP})
+	record("UDP", m.ports.MediaUDP)
 	if m.ports.MediaTCP != 0 {
 		if err := gw.Map(ctx, "TCP", m.ports.MediaTCP, m.ports.MediaTCP, "Windstream media (TCP)"); err == nil {
-			maps = append(maps, mapping{"TCP", m.ports.MediaTCP})
+			record("TCP", m.ports.MediaTCP)
 		}
 	}
-	m.mu.Lock()
-	m.mapped = maps
-	m.mu.Unlock()
 	return ext, nil
 }
 

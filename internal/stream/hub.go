@@ -78,6 +78,7 @@ type Hub struct {
 	tcp        net.Listener
 
 	mu         sync.Mutex
+	closed     bool
 	clients    map[*Client]struct{}
 	codec      string          // video codec being streamed ("" while idle)
 	lastPrefs  []string        // codec preferences of the newest viewer
@@ -88,6 +89,7 @@ type Hub struct {
 	pipeCancel context.CancelFunc
 	runCancel  context.CancelFunc // stops the current encoder run (codec switch)
 	pipeWG     sync.WaitGroup
+	pipeDone   chan struct{} // closed when the latest pipeline set has fully stopped
 	stopTimer  *time.Timer
 
 	probeMu sync.Mutex // serializes encoder probing
@@ -209,6 +211,7 @@ func (h *Hub) closeSockets() {
 // Close stops pipelines and disconnects every client.
 func (h *Hub) Close() {
 	h.mu.Lock()
+	h.closed = true // no new clients from here on
 	clients := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
 		clients = append(clients, c)
@@ -246,6 +249,9 @@ func (h *Hub) ClientCount() int {
 func (h *Hub) addClient(c *Client) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closed {
+		return errors.New("stream: the streaming engine is restarting")
+	}
 	if len(h.clients) >= h.cfg.MaxClients {
 		return fmt.Errorf("stream: client limit (%d) reached", h.cfg.MaxClients)
 	}
@@ -280,12 +286,31 @@ func (h *Hub) removeClient(c *Client) {
 func (h *Hub) startPipelinesLocked() {
 	ctx, cancel := context.WithCancel(h.ctx)
 	h.pipeCancel = cancel
+	prev, done := h.pipeDone, make(chan struct{})
+	h.pipeDone = done
 	h.pipeWG.Add(1)
-	go h.keepRunning(ctx, "video", h.runVideo)
-	if h.cfg.AudioEnabled {
-		h.pipeWG.Add(1)
-		go h.keepRunning(ctx, "audio", h.runAudio)
-	}
+	go func() {
+		defer h.pipeWG.Done()
+		defer close(done)
+		// A viewer reconnecting right after the last one left must not
+		// start a second capture and encoder while the previous ones are
+		// still shutting down: they would fight over the display and the
+		// GPU encoder, and interleave packets on the same track.
+		if prev != nil {
+			<-prev
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go h.keepRunning(ctx, &wg, "video", h.runVideo)
+		if h.cfg.AudioEnabled {
+			wg.Add(1)
+			go h.keepRunning(ctx, &wg, "audio", h.runAudio)
+		}
+		wg.Wait()
+	}()
 }
 
 func (h *Hub) stopPipelinesLocked() {
@@ -304,8 +329,8 @@ func (h *Hub) stopPipelinesLocked() {
 // (a display, driver or encoder edge case) is logged and the pipeline is
 // started again a second later, instead of crashing the process or leaving
 // viewers with a frozen stream.
-func (h *Hub) keepRunning(ctx context.Context, which string, run func(context.Context)) {
-	defer h.pipeWG.Done()
+func (h *Hub) keepRunning(ctx context.Context, wg *sync.WaitGroup, which string, run func(context.Context)) {
+	defer wg.Done()
 	for ctx.Err() == nil {
 		if !safe.Call(h.log, which+" pipeline", func() { run(ctx) }) {
 			return // returned normally: ctx is done
@@ -522,7 +547,7 @@ func (h *Hub) attach(c *Client, prefs []string) error {
 	h.probeCodecs(h.ctx, prefs)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, ok := h.clients[c]; !ok {
+	if _, ok := h.clients[c]; !ok || h.closed {
 		return errors.New("client closed")
 	}
 	c.codecs = prefs

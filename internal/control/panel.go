@@ -57,11 +57,15 @@ func newPanel(c *Controller) *panel {
 	}
 }
 
-func (p *panel) run(ctx context.Context) error {
+func (p *panel) listen() (net.Listener, error) {
 	ln, err := net.Listen("tcp", p.c.panelAddr)
 	if err != nil {
-		return fmt.Errorf("dashboard port %s is busy: %w", p.c.panelAddr, err)
+		return nil, fmt.Errorf("dashboard port %s is busy: %w", p.c.panelAddr, err)
 	}
+	return ln, nil
+}
+
+func (p *panel) serve(ctx context.Context, ln net.Listener) error {
 	srv := &http.Server{Handler: p.routes(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -232,6 +236,7 @@ func (p *panel) handleState(w http.ResponseWriter, r *http.Request) {
 	ns := p.c.netStatus()
 	resp["users"] = users
 	resp["last_crash"] = p.c.opts.LastCrash
+	resp["config_notice"] = p.c.configNotice
 	resp["deps"] = p.c.deps.Snapshot()
 	resp["network"] = ns
 	resp["stream"] = p.c.stackStatus()
@@ -246,10 +251,7 @@ func (p *panel) handleState(w http.ResponseWriter, r *http.Request) {
 			"size": fmt.Sprintf("%dx%d", o.Width, o.Height), "primary": o.Primary})
 	}
 	resp["monitors"] = monitors
-	link := ns.PublicURL
-	if link == "" {
-		link = ns.LANURL
-	}
+	link := ns.Link()
 	resp["link"] = link
 	if link != "" {
 		if png, err := qrcode.Encode(link, qrcode.Medium, 256); err == nil {

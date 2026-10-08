@@ -45,10 +45,15 @@ func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src So
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
-	go logStderr(stderr, log.With("pipeline", "video", "encoder", EncoderName(codec, vendor)))
+	stderrDone := make(chan struct{})
+	go func() {
+		logStderr(stderr, log.With("pipeline", "video", "encoder", EncoderName(codec, vendor)))
+		close(stderrDone)
+	}()
 	exited := make(chan error, 1)
 	go func() {
 		defer safe.Recover(log, "ffmpeg wait")
+		waitForReader(stderrDone)
 		exited <- cmd.Wait()
 		conn.Close() // unblock the read loop
 	}()
