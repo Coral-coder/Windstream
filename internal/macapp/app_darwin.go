@@ -127,6 +127,9 @@ func startAgent(exe string) error {
 	if err := os.WriteFile(agentPlistPath(), []byte(AgentPlist(exe, logs)), 0o644); err != nil {
 		return err
 	}
+	// A loaded but dead agent (nothing answers, or this is an update) must
+	// be unloaded first, or bootstrap fails and the new plist is ignored.
+	_ = exec.Command("/bin/launchctl", "bootout", "gui/"+uid()+"/"+Label).Run()
 	out, err := exec.Command("/bin/launchctl", "bootstrap", "gui/"+uid(), agentPlistPath()).CombinedOutput()
 	if err != nil && !strings.Contains(string(out), "already") {
 		// Older macOS: the legacy verb.
