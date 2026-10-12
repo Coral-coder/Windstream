@@ -149,6 +149,14 @@ function renderDeps(deps) {
     const sub = document.createElement('span'); sub.className = 'sub';
     sub.textContent = d.state === 'ready' ? d.purpose : d.state === 'error' ? d.detail : d.state === 'pending' ? 'Waiting…' : d.state === 'skipped' ? d.detail : (d.detail || d.state);
     li.append(sub);
+    if (d.action === 'allow') {
+      const b = document.createElement('button');
+      b.className = 'ghost small-btn'; b.textContent = 'Allow…';
+      b.addEventListener('click', async () => {
+        try { await api('/api/permission', { id: d.id }); } catch (e) { alert(e.message); }
+      });
+      li.append(b);
+    }
     if (d.state === 'downloading') {
       const bar = document.createElement('div'); bar.className = 'bar';
       const i = document.createElement('i'); i.style.width = `${Math.round(d.progress * 100)}%`;
@@ -209,8 +217,28 @@ $('#btn-uninstall').addEventListener('click', async () => {
   } catch (e) { alert(e.message); }
 });
 
+// On a Mac some settings do not apply (no virtual screen, controllers or
+// AV1 encoder) and the encoder is Apple's.
+let adaptedForMac = false;
+function adaptForMac() {
+  if (adaptedForMac) return;
+  adaptedForMac = true;
+  const f = $('#form-settings');
+  f.encoder.innerHTML = '<option value="auto">Automatic (Apple media engine)</option>' +
+    '<option value="videotoolbox">Apple VideoToolbox</option><option value="x264">Software (CPU)</option>';
+  for (const o of [...f.codec.options]) if (o.value === 'av1') o.remove();
+  for (const o of [...f.display_mode.options]) if (o.value === 'virtual') o.remove();
+  for (const name of ['make_primary', 'gamepads']) f[name].closest('label').classList.add('hidden');
+  $('#steam-row').classList.add('hidden');
+  for (const el of document.querySelectorAll('h2')) if (el.textContent === 'This PC') el.textContent = 'This Mac';
+  for (const el of document.querySelectorAll('label')) {
+    for (const n of el.childNodes) if (n.nodeType === 3) n.textContent = n.textContent.replace('on this PC', 'on this Mac');
+  }
+}
+
 function renderDash(s) {
   lastState = s;
+  if (s.platform === 'darwin') adaptForMac();
   $('#who').textContent = s.user;
   const n = s.network || {};
   const link = $('#link');
@@ -253,8 +281,9 @@ function renderDash(s) {
   $('#encoder').textContent = (st.stats && st.stats.encoder) || 'chosen when someone connects';
   const aerr = st.stats && st.stats.audio_error;
   $('#audio').textContent = !s.settings || !s.settings.audio ? 'off'
+    : st.audio_notice ? 'needs a loopback driver (hover for how)'
     : aerr ? 'no audio device found on this PC' : st.running && st.stats && st.stats.clients ? 'on' : 'on when streaming';
-  $('#audio').title = aerr || '';
+  $('#audio').title = st.audio_notice || aerr || '';
   $('#upnp').textContent = { mapped: 'Ports opened automatically ✓', disabled: 'Automatic setup off', unavailable: 'No UPnP router found', error: 'Router refused' }[n.upnp] || '…';
   $('#pubip').textContent = n.public_ip || (n.checked ? "Couldn't detect" : '…');
   $('#forward-why').textContent = n.upnp === 'disabled'

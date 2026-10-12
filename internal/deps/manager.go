@@ -1,8 +1,10 @@
 package deps
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -32,6 +34,9 @@ type Component struct {
 	State    State   `json:"state"`
 	Progress float64 `json:"progress"` // 0..1 while downloading
 	Detail   string  `json:"detail,omitempty"`
+	// Action, when set, is a button the dashboard shows ("allow": ask
+	// macOS for a permission).
+	Action string `json:"action,omitempty"`
 }
 
 // Manager ensures every dependency is present.
@@ -52,6 +57,9 @@ type Manager struct {
 func NewManager(dataDir string, log *slog.Logger) *Manager {
 	m := &Manager{dataDir: dataDir, log: log, comps: map[string]*Component{}}
 	m.add("ffmpeg", "Video & audio encoder", "Captures the screen and encodes H.264/Opus")
+	if runtime.GOOS == "darwin" {
+		return m // no drivers to install on a Mac
+	}
 	m.add("vdd", "Virtual display", "Gives the PC a virtual monitor to stream, no screen needed")
 	m.add("vigem", "Controller driver", "Lets remote controllers appear as Xbox controllers")
 	return m
@@ -101,6 +109,9 @@ func (m *Manager) FFmpegPath() string {
 // failure is recorded and the rest continue.
 func (m *Manager) EnsureAll(ctx context.Context) {
 	m.ensureFFmpeg(ctx)
+	if runtime.GOOS == "darwin" {
+		return
+	}
 	if runtime.GOOS != "windows" {
 		m.set("vdd", StateSkipped, 0, "Windows only")
 		m.set("vigem", StateSkipped, 0, "Windows only")
@@ -134,8 +145,26 @@ func (m *Manager) progressFn(id string) Progress {
 	}
 }
 
+// ffmpegBuild says which pinned ffmpeg this OS/CPU uses, the file name it
+// installs as, and how to unpack it.
+func ffmpegBuild(goos, goarch string) (Artifact, string, func(archive, binDir string) error) {
+	switch {
+	case goos == "windows":
+		return FFmpeg, "ffmpeg.exe", func(archive, binDir string) error {
+			_, err := ExtractMatching(archive, "/bin/ffmpeg.exe", binDir)
+			return err
+		}
+	case goos == "darwin" && goarch == "arm64":
+		return FFmpegMacARM64, "ffmpeg", gunzipTo("ffmpeg")
+	case goos == "darwin":
+		return FFmpegMacX64, "ffmpeg", gunzipTo("ffmpeg")
+	}
+	return Artifact{}, "", nil
+}
+
 func (m *Manager) ensureFFmpeg(ctx context.Context) {
-	if runtime.GOOS != "windows" {
+	art, exeName, unpack := ffmpegBuild(runtime.GOOS, runtime.GOARCH)
+	if art.URL == "" {
 		if p, err := exec.LookPath("ffmpeg"); err == nil {
 			m.mu.Lock()
 			m.ffmpegPath = p
@@ -147,25 +176,25 @@ func (m *Manager) ensureFFmpeg(ctx context.Context) {
 		return
 	}
 	binDir := filepath.Join(m.dataDir, "bin")
-	exe := filepath.Join(binDir, "ffmpeg.exe")
+	exe := filepath.Join(binDir, exeName)
 	marker := filepath.Join(binDir, "ffmpeg.version")
-	if b, err := os.ReadFile(marker); err == nil && string(b) == FFmpeg.SHA256 {
+	if b, err := os.ReadFile(marker); err == nil && string(b) == art.SHA256 {
 		if _, err := os.Stat(exe); err == nil {
 			m.mu.Lock()
 			m.ffmpegPath = exe
 			m.mu.Unlock()
-			m.set("ffmpeg", StateReady, 1, FFmpeg.Name)
+			m.set("ffmpeg", StateReady, 1, art.Name)
 			return
 		}
 	}
 	m.run(ctx, "ffmpeg", func(ctx context.Context) error {
-		zipPath := filepath.Join(m.dataDir, "downloads", filepath.Base(FFmpeg.URL))
+		archive := filepath.Join(m.dataDir, "downloads", filepath.Base(art.URL))
 		// Nothing streams without the encoder, so a failed download (PC
 		// still connecting to Wi-Fi at logon, a flaky connection) is retried
 		// until it works rather than left for the user to notice.
 		for wait := 10 * time.Second; ; wait = min(wait*2, 5*time.Minute) {
-			m.log.Info("downloading", "artifact", FFmpeg.Name)
-			err := Download(ctx, FFmpeg, zipPath, m.progressFn("ffmpeg"))
+			m.log.Info("downloading", "artifact", art.Name)
+			err := Download(ctx, art, archive, m.progressFn("ffmpeg"))
 			if err == nil {
 				break
 			}
@@ -181,19 +210,50 @@ func (m *Manager) ensureFFmpeg(ctx context.Context) {
 			}
 		}
 		m.set("ffmpeg", StateInstalling, 1, "extracting")
-		if _, err := ExtractMatching(zipPath, "/bin/ffmpeg.exe", binDir); err != nil {
+		if err := os.MkdirAll(binDir, 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(marker, []byte(FFmpeg.SHA256), 0o644); err != nil {
+		if err := unpack(archive, binDir); err != nil {
 			return err
 		}
-		_ = os.Remove(zipPath) // 115 MB we no longer need
+		if err := os.WriteFile(marker, []byte(art.SHA256), 0o644); err != nil {
+			return err
+		}
+		_ = os.Remove(archive) // no longer needed
 		m.mu.Lock()
 		m.ffmpegPath = exe
 		m.mu.Unlock()
-		m.log.Info("installed", "artifact", FFmpeg.Name, "path", exe)
+		m.log.Info("installed", "artifact", art.Name, "path", exe)
 		return nil
 	})
+}
+
+// gunzipTo unpacks a single gzip-compressed program into binDir/name.
+func gunzipTo(name string) func(archive, binDir string) error {
+	return func(archive, binDir string) error {
+		in, err := os.Open(archive)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		zr, err := gzip.NewReader(in)
+		if err != nil {
+			return err
+		}
+		tmp := filepath.Join(binDir, name+".tmp")
+		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, io.LimitReader(zr, 1<<30)); err != nil {
+			out.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			return err
+		}
+		return os.Rename(tmp, filepath.Join(binDir, name))
+	}
 }
 
 func shorten(s string, n int) string {

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -100,6 +101,7 @@ func (p *panel) routes() http.Handler {
 	mux.HandleFunc("POST /api/quit", p.authed(p.handleQuit))
 	mux.HandleFunc("GET /api/logs.zip", p.authed(p.handleLogsZip))
 	mux.HandleFunc("POST /api/logs/open", p.authed(p.handleOpenLogs))
+	mux.HandleFunc("POST /api/permission", p.authed(p.handlePermission))
 	return p.guard(mux)
 }
 
@@ -238,7 +240,12 @@ func (p *panel) handleState(w http.ResponseWriter, r *http.Request) {
 	resp["last_crash"] = p.c.opts.LastCrash
 	resp["config_notice"] = p.c.configNotice
 	resp["sign_ins"] = p.c.signIns.recent()
-	resp["deps"] = p.c.deps.Snapshot()
+	comps := p.c.deps.Snapshot()
+	if pr, ok := p.c.opts.Platform.(PermissionReporter); ok {
+		comps = append(comps, pr.Permissions()...)
+	}
+	resp["deps"] = comps
+	resp["platform"] = runtime.GOOS
 	resp["network"] = ns
 	resp["stream"] = p.c.stackStatus()
 	resp["https_error"] = p.c.httpsError()

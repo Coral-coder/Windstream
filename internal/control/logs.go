@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"github.com/coral-coder/windstream/internal/deps"
 	"io"
 	"net/http"
 	"os"
@@ -17,6 +18,16 @@ import (
 // user (Explorer on Windows).
 type FolderOpener interface {
 	OpenFolder(path string) error
+}
+
+// PermissionReporter is implemented by platforms where the user must grant
+// the app permissions (macOS: Screen Recording, Accessibility). They are
+// shown with the components on the dashboard.
+type PermissionReporter interface {
+	Permissions() []deps.Component
+	// RequestPermission asks the OS for a permission and shows the user
+	// where to grant it.
+	RequestPermission(id string) error
 }
 
 // SystemInfoer is implemented by platforms that can describe the PC (OS
@@ -133,4 +144,24 @@ func (c *Controller) diagnostics() string {
 			o.Index, o.DeviceName, o.Width, o.Height, o.X, o.Y, o.Primary, o.MonitorName, o.AdapterName, o.Adapter, o.Output)
 	}
 	return b.String()
+}
+
+// handlePermission asks the OS for a permission (macOS) and opens the
+// System Settings page where it is granted.
+func (p *panel) handlePermission(w http.ResponseWriter, r *http.Request) {
+	var req struct{ ID string }
+	if err := decode(r, &req); err != nil {
+		jsonErr(w, http.StatusBadRequest, "Bad request")
+		return
+	}
+	pr, ok := p.c.opts.Platform.(PermissionReporter)
+	if !ok {
+		jsonErr(w, http.StatusBadRequest, "No permissions to grant on this system")
+		return
+	}
+	if err := pr.RequestPermission(req.ID); err != nil {
+		jsonErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
 }

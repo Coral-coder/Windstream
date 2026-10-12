@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"time"
 )
@@ -19,6 +20,18 @@ type Source struct {
 	// (ffmpeg ddagrab output_idx).
 	Adapter int
 	Output  int
+	// Screen is the macOS screen to capture through AVFoundation, e.g.
+	// "Capture screen 0". When set, Adapter and Output are ignored.
+	Screen string
+}
+
+// ScreenSource is the capture source for output number output on adapter,
+// on the OS Windstream runs on.
+func ScreenSource(adapter, output int) Source {
+	if runtime.GOOS == "darwin" {
+		return Source{Screen: fmt.Sprintf("Capture screen %d", output)}
+	}
+	return Source{Adapter: adapter, Output: output}
 }
 
 // VideoConfig is everything the video pipeline needs.
@@ -52,7 +65,14 @@ func ValidCodec(c string) bool { return c == CodecAV1 || c == CodecH265 || c == 
 // EncoderOrder is the vendor preference used by "auto": every GPU vendor's
 // hardware encoder first (they also keep frames on the GPU), software last.
 // "x264" is the historical name of the software vendor.
-var EncoderOrder = []string{"nvenc", "amf", "qsv", "x264"}
+var EncoderOrder = encoderOrder(runtime.GOOS)
+
+func encoderOrder(goos string) []string {
+	if goos == "darwin" {
+		return []string{"videotoolbox", "x264"} // Apple's media engine
+	}
+	return []string{"nvenc", "amf", "qsv", "x264"}
+}
 
 // IsHardware reports whether a vendor encodes on the GPU.
 func IsHardware(vendor string) bool { return vendor != "x264" }
@@ -62,8 +82,8 @@ func IsHardware(vendor string) bool { return vendor != "x264" }
 // ordinary CPUs. Software AV1 (SVT-AV1) is only used when the viewer's
 // browser can decode nothing else (the hub ranks it last).
 var ffmpegEncoders = map[string]map[string]string{
-	CodecH264: {"nvenc": "h264_nvenc", "amf": "h264_amf", "qsv": "h264_qsv", "x264": "libx264"},
-	CodecH265: {"nvenc": "hevc_nvenc", "amf": "hevc_amf", "qsv": "hevc_qsv"},
+	CodecH264: {"nvenc": "h264_nvenc", "amf": "h264_amf", "qsv": "h264_qsv", "videotoolbox": "h264_videotoolbox", "x264": "libx264"},
+	CodecH265: {"nvenc": "hevc_nvenc", "amf": "hevc_amf", "qsv": "hevc_qsv", "videotoolbox": "hevc_videotoolbox"},
 	CodecAV1:  {"nvenc": "av1_nvenc", "amf": "av1_amf", "qsv": "av1_qsv", "x264": "libsvtav1"},
 }
 
@@ -149,6 +169,19 @@ func BuildVideoArgs(cfg VideoConfig, codec, vendor string, src Source, rtpURL st
 		default:
 			args = append(args, "-pix_fmt", "yuv420p")
 		}
+	} else if src.Screen != "" {
+		// macOS: AVFoundation screen capture. A Retina screen is captured
+		// at its full pixel size; scale it to the configured stream size
+		// (keeping its shape) so the bitrate goes to detail people can see.
+		args = append(args, "-f", "avfoundation", "-capture_cursor", cursor, "-capture_mouse_clicks", "0",
+			"-framerate", fps, "-pixel_format", "nv12", "-i", src.Screen+":none",
+			"-vf", fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear,fps=%s",
+				cfg.Width, cfg.Height, fps))
+		if software {
+			args = append(args, "-pix_fmt", "yuv420p")
+		} else {
+			args = append(args, "-pix_fmt", "nv12")
+		}
 	} else {
 		// Desktop Duplication straight into a D3D11 texture on the GPU that
 		// drives the captured output. Hardware encoders consume that texture
@@ -210,6 +243,9 @@ func BuildVideoArgs(cfg VideoConfig, codec, vendor string, src Source, rtpURL st
 		case CodecAV1:
 			args = append(args, "-latency", "lowest_latency", "-header_insertion_mode", "frame")
 		}
+	case "videotoolbox":
+		// Real-time, speed over compression, never fall back to software.
+		args = append(args, "-realtime", "1", "-prio_speed", "1", "-allow_sw", "0")
 	case "qsv":
 		if preset == "" {
 			preset = "veryfast"

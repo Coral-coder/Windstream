@@ -153,7 +153,7 @@ func hubConfig(cfg *config.Config, disp *display.Manager) stream.Config {
 			if cfg.Display.Mode == "test" {
 				adapter = cfg.Video.GPU
 			}
-			return media.Source{Adapter: adapter, Output: t.Output}, nil
+			return media.ScreenSource(adapter, t.Output), nil
 		},
 		Audio: media.AudioConfig{FFmpeg: cfg.Video.FFmpegBinary, Backend: cfg.Audio.Backend,
 			Device: cfg.Audio.Device, BitrateKbps: cfg.Audio.BitrateKbps},

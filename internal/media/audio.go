@@ -55,6 +55,10 @@ func BuildAudioArgs(cfg AudioConfig, pcm *PCMFormat) []string {
 		args = append(args, "-f", fmtName, "-ar", strconv.Itoa(pcm.Rate), "-ac", strconv.Itoa(pcm.Channels), "-i", "pipe:0")
 	case "dshow":
 		args = append(args, "-nostdin", "-f", "dshow", "-audio_buffer_size", "10", "-i", "audio="+cfg.Device)
+	case "avfoundation":
+		// macOS: a loopback device (e.g. BlackHole) that receives what the
+		// Mac plays.
+		args = append(args, "-nostdin", "-f", "avfoundation", "-i", ":"+cfg.Device)
 	default: // test
 		args = append(args, "-nostdin", "-re", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000")
 	}

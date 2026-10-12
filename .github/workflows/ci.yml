@@ -37,3 +37,33 @@ jobs:
       - name: Smoke test (CLI attaches to the console)
         shell: bash
         run: ./Windstream.exe version
+
+  macos:
+    name: build Windstream.app (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Pinned ffmpeg (the one the app downloads) runs and encodes
+        run: |
+          curl -sSL -o ffmpeg.gz https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz
+          echo "8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa  ffmpeg.gz" | shasum -a 256 -c -
+          gunzip ffmpeg.gz && chmod +x ffmpeg
+          ./ffmpeg -hide_banner -f lavfi -i testsrc2=s=640x360:r=30 -frames:v 30 -c:v libx264 -f null -
+          ./ffmpeg -hide_banner -f lavfi -i testsrc2=s=640x360:r=30 -frames:v 30 -pix_fmt nv12 -c:v h264_videotoolbox -realtime 1 -f null - || echo "::warning::VideoToolbox is not available on this virtual machine"
+          ./ffmpeg -hide_banner -f avfoundation -list_devices true -i "" || true
+      - run: go vet ./...
+      - name: Tests (pipeline tests use the pinned ffmpeg)
+        run: WINDSTREAM_TEST_FFMPEG=$PWD/ffmpeg go test ./...
+      - name: Build the app bundle
+        run: |
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::8}" -o ws-arm64 ./cmd/windstream
+          GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_SHA::8}" -o ws-amd64 ./cmd/windstream
+          lipo -create -output windstream ws-arm64 ws-amd64
+          go run ./tools/macbundle -exe windstream -version "${GITHUB_SHA::8}" -out dist
+          codesign --force --deep --sign - dist/Windstream.app
+          codesign --verify --deep --strict dist/Windstream.app
+          dist/Windstream.app/Contents/MacOS/Windstream version
+          dist/Windstream.app/Contents/MacOS/Windstream --tcc-check

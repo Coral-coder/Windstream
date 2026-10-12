@@ -2,6 +2,8 @@ package deps
 
 import (
 	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -104,5 +106,40 @@ func TestVDDSettingsXML(t *testing.T) {
 	}
 	if changed, _ := WriteVDDSettings(dir, 1920, 1080, 60); changed {
 		t.Fatal("unchanged settings rewritten")
+	}
+}
+
+func TestFFmpegBuildPerOS(t *testing.T) {
+	for _, tc := range []struct{ goos, goarch, want string }{
+		{"windows", "amd64", FFmpeg.URL},
+		{"darwin", "arm64", FFmpegMacARM64.URL},
+		{"darwin", "amd64", FFmpegMacX64.URL},
+		{"linux", "amd64", ""},
+	} {
+		art, _, _ := ffmpegBuild(tc.goos, tc.goarch)
+		if art.URL != tc.want {
+			t.Errorf("%s/%s: %q", tc.goos, tc.goarch, art.URL)
+		}
+	}
+}
+
+func TestGunzipTo(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "ffmpeg.gz")
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write([]byte("#!/bin/sh\necho ffmpeg\n"))
+	_ = zw.Close()
+	if err := os.WriteFile(archive, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "bin")
+	_ = os.MkdirAll(bin, 0o755)
+	if err := gunzipTo("ffmpeg")(archive, bin); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(filepath.Join(bin, "ffmpeg"))
+	if err != nil || st.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("not installed executable: %v %v", st, err)
 	}
 }

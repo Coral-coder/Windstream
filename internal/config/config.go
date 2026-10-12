@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -259,7 +260,21 @@ func AppDefaults() Config {
 	c := Default()
 	c.TLS = TLS{Auto: true}
 	c.Auth.RequireTOTP = true
+	adaptToOS(&c, runtime.GOOS)
 	return c
+}
+
+// adaptToOS adjusts the defaults for the operating system the app runs on.
+func adaptToOS(c *Config, goos string) {
+	if goos != "darwin" {
+		return
+	}
+	// A Mac has no virtual display driver or game controller bus: stream
+	// the main display, capture sound from a loopback device (BlackHole)
+	// when one is installed, and use Apple's hardware encoder.
+	c.Display.Mode, c.Display.Monitor, c.Display.MakePrimary = "monitor", "0", false
+	c.Audio.Backend, c.Audio.Device = "avfoundation", ""
+	c.Input.Gamepads = false
 }
 
 // Save writes the configuration atomically with owner-only permissions.
@@ -408,7 +423,7 @@ func errCount(c Config) int {
 	return strings.Count(err.Error(), "\n") + 1
 }
 
-var validEncoders = map[string]bool{"auto": true, "nvenc": true, "amf": true, "qsv": true, "x264": true}
+var validEncoders = map[string]bool{"auto": true, "nvenc": true, "amf": true, "qsv": true, "videotoolbox": true, "x264": true}
 
 // Validate checks the configuration for consistency.
 func (c *Config) Validate() error {
@@ -530,13 +545,13 @@ func (c *Config) Validate() error {
 			add("audio.bitrate_kbps must be >= 16")
 		}
 		switch c.Audio.Backend {
-		case "wasapi", "test":
+		case "wasapi", "test", "avfoundation": // avfoundation: empty device = find a loopback device
 		case "dshow":
 			if c.Audio.Device == "" {
 				add("audio.device is required for the dshow backend")
 			}
 		default:
-			add("audio.backend must be wasapi, dshow or test")
+			add("audio.backend must be wasapi, avfoundation, dshow or test")
 		}
 	}
 	if c.WebRTC.UDPPort < 1 || c.WebRTC.UDPPort > 65535 {

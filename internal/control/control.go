@@ -88,12 +88,15 @@ type Controller struct {
 	tls      *server.AutoTLS
 	srv      *server.Server
 
-	stackMu    sync.Mutex
-	disp       *display.Manager
-	hub        *stream.Hub
-	stackErr   string
-	stackMode  string
-	restartReq chan struct{}
+	stackMu   sync.Mutex
+	disp      *display.Manager
+	hub       *stream.Hub
+	stackErr  string
+	stackMode string
+	// audioNotice explains why sound is off (macOS without a loopback
+	// device).
+	audioNotice string
+	restartReq  chan struct{}
 
 	panel     *panel
 	panelAddr string
@@ -563,6 +566,18 @@ func (c *Controller) restartStack(ctx context.Context) {
 		}
 	}
 	cfg.Display.Mode = mode
+	c.audioNotice = ""
+	if cfg.Audio.Enabled && cfg.Audio.Backend == "avfoundation" && cfg.Audio.Device == "" {
+		// macOS only lets apps hear what the Mac plays through a loopback
+		// device; use one if it is installed.
+		if dev := media.PickLoopback(media.AVFoundationAudioDevices(ctx, c.deps.FFmpegPath())); dev != "" {
+			cfg.Audio.Device = dev
+			c.log.Info("capturing sound through loopback device", "device", dev)
+		} else {
+			cfg.Audio.Enabled = false
+			c.audioNotice = "To stream sound, install the free BlackHole 2ch audio driver, then in Audio MIDI Setup create a Multi-Output Device (your speakers + BlackHole) and choose it as the Mac's output."
+		}
+	}
 	if mode == "virtual" {
 		if changed, err := deps.WriteVDDSettings(deps.VDDConfigDir, cfg.Display.Width, cfg.Display.Height, cfg.Display.Refresh); err == nil && changed {
 			c.log.Info("virtual display modes updated")
@@ -625,7 +640,7 @@ func HubConfig(cfg *config.Config, disp *display.Manager, ffmpeg string, webrtcC
 			if t.Test {
 				return media.Source{Test: true, Adapter: cfg.Video.GPU}, nil
 			}
-			return media.Source{Adapter: t.Adapter, Output: t.Output}, nil
+			return media.ScreenSource(t.Adapter, t.Output), nil
 		},
 		Audio: media.AudioConfig{FFmpeg: ffmpeg, Backend: cfg.Audio.Backend,
 			Device: cfg.Audio.Device, BitrateKbps: cfg.Audio.BitrateKbps},
@@ -647,16 +662,17 @@ func listOutputs() []display.Output {
 
 // stackStatus is shown on the dashboard.
 type stackStatus struct {
-	Running bool         `json:"running"`
-	Mode    string       `json:"mode"`
-	Error   string       `json:"error,omitempty"`
-	Stats   stream.Stats `json:"stats"`
+	AudioNotice string       `json:"audio_notice,omitempty"`
+	Running     bool         `json:"running"`
+	Mode        string       `json:"mode"`
+	Error       string       `json:"error,omitempty"`
+	Stats       stream.Stats `json:"stats"`
 }
 
 func (c *Controller) stackStatus() stackStatus {
 	c.stackMu.Lock()
 	defer c.stackMu.Unlock()
-	st := stackStatus{Running: c.hub != nil, Mode: c.stackMode, Error: c.stackErr}
+	st := stackStatus{Running: c.hub != nil, Mode: c.stackMode, Error: c.stackErr, AudioNotice: c.audioNotice}
 	if c.hub != nil {
 		st.Stats = c.hub.Stats()
 	}

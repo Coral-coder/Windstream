@@ -21,6 +21,22 @@ var (
 		SHA256: "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
 		Size:   114768076,
 	}
+	// FFmpegMacARM64 / FFmpegMacX64 are the static macOS builds published by
+	// the ffmpeg-static project (osxexperts.net / evermeet.cx builds): only
+	// system frameworks, with AVFoundation capture, VideoToolbox, libx264
+	// and libopus. The Apple silicon build is code-signed (required there).
+	FFmpegMacARM64 = Artifact{
+		Name:   "ffmpeg 6.1.1 (Apple silicon)",
+		URL:    "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64.gz",
+		SHA256: "8923876afa8db5585022d7860ec7e589af192f441c56793971276d450ed3bbfa",
+		Size:   19246198,
+	}
+	FFmpegMacX64 = Artifact{
+		Name:   "ffmpeg 6.1.1 (Intel)",
+		URL:    "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64.gz",
+		SHA256: "929b375c1182d956c51f7ac25e0b2b0411fb01f6f407aa15c9758efeb4242106",
+		Size:   25296431,
+	}
 	// VirtualDisplayDriver is the signed IddCx driver package (x64, despite
 	// the "x86" in the upstream file name).
 	VirtualDisplayDriver = Artifact{
