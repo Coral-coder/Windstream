@@ -87,6 +87,7 @@ func (c *Controller) diagnostics() string {
 	line("Windstream", c.opts.Version)
 	line("Generated", time.Now().Format(time.RFC1123Z))
 	line("Platform", runtime.GOOS+"/"+runtime.GOARCH)
+	line("Built with", runtime.Version())
 	if si, ok := c.opts.Platform.(SystemInfoer); ok {
 		line("System", si.SystemInfo())
 	}

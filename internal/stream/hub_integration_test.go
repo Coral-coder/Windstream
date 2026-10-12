@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/coral-coder/windstream/internal/config"
@@ -58,6 +59,17 @@ func TestHubEndToEnd(t *testing.T) {
 // the zero playout-delay extension, and round-trips a ping over the input
 // channel.
 func runHubEndToEnd(t *testing.T, codecs []string, wantMime, wantEncoder string) {
+	runHubEndToEndWith(t, codecs, wantMime, wantEncoder, e2eOptions{})
+}
+
+type e2eOptions struct {
+	// dropEvery makes the "browser" lose every Nth video packet, so it
+	// sends NACKs and the hub retransmits (RTX), for this long.
+	dropEvery int
+	hold      time.Duration
+}
+
+func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder string, opt e2eOptions) {
 	ff := testFFmpeg(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
@@ -87,7 +99,16 @@ func runHubEndToEnd(t *testing.T, codecs []string, wantMime, wantEncoder string)
 	if err := me.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{URI: playoutDelayURI}, webrtc.RTPCodecTypeVideo); err != nil {
 		t.Fatal(err)
 	}
-	browser, err := webrtc.NewAPI(webrtc.WithMediaEngine(me)).NewPeerConnection(webrtc.Configuration{})
+	ir := &interceptor.Registry{}
+	var dropped atomic.Int32
+	if opt.dropEvery > 0 {
+		// Registered first, so the NACK generator after it sees the gaps.
+		ir.Add(&lossFactory{every: opt.dropEvery, dropped: &dropped})
+		if err := webrtc.RegisterDefaultInterceptors(me, ir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	browser, err := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithInterceptorRegistry(ir)).NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +243,10 @@ func runHubEndToEnd(t *testing.T, codecs []string, wantMime, wantEncoder string)
 	case <-ctx.Done():
 		t.Fatalf("no video RTP received (state=%s, packets=%d)", browser.ConnectionState(), packets.Load())
 	}
+	if opt.hold > 0 {
+		time.Sleep(opt.hold)
+		t.Logf("dropped %d packets; %d delivered in %s", dropped.Load(), packets.Load(), opt.hold)
+	}
 	select {
 	case ts := <-pong:
 		if ts != 0x12345678 {
@@ -240,4 +265,43 @@ func runHubEndToEnd(t *testing.T, codecs []string, wantMime, wantEncoder string)
 	if st := hub.Stats(); st.Clients != 0 || st.Running {
 		t.Errorf("pipeline should stop after last client leaves: %+v", st)
 	}
+}
+
+// lossFactory drops every Nth incoming video RTP packet on the receiving
+// side, like a lossy Wi-Fi or mobile link.
+type lossFactory struct {
+	every   int
+	dropped *atomic.Int32
+}
+
+func (f *lossFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
+	return &lossInterceptor{f: f}, nil
+}
+
+type lossInterceptor struct {
+	interceptor.NoOp
+	f *lossFactory
+	n atomic.Int64
+}
+
+func (l *lossInterceptor) BindRemoteStream(info *interceptor.StreamInfo, r interceptor.RTPReader) interceptor.RTPReader {
+	if info.MimeType == "" || info.MimeType[:5] != "video" {
+		return r
+	}
+	return interceptor.RTPReaderFunc(func(b []byte, a interceptor.Attributes) (int, interceptor.Attributes, error) {
+		for {
+			n, attrs, err := r.Read(b, a)
+			if err != nil || l.n.Add(1)%int64(l.f.every) != 0 {
+				return n, attrs, err
+			}
+			l.f.dropped.Add(1)
+		}
+	})
+}
+
+func TestHubRetransmitsUnderLoss(t *testing.T) {
+	// The crash reports from Oct 8 and Oct 12 died in the NACK responder
+	// while retransmitting video; exercise that path under the race
+	// detector for several seconds.
+	runHubEndToEndWith(t, []string{"h264"}, webrtc.MimeTypeH264, "libx264", e2eOptions{dropEvery: 7, hold: 8 * time.Second})
 }
