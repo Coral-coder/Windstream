@@ -93,6 +93,8 @@ type Hub struct {
 	encoder    string
 	lastErr    string
 	audioErr   string
+	notice     string      // what viewers are told is wrong with the picture
+	noticeOn   atomic.Bool // notice != "" (checked per packet without the lock)
 	pipeCancel context.CancelFunc
 	runCancel  context.CancelFunc // stops the current encoder run (codec switch)
 	pipeWG     sync.WaitGroup
@@ -330,6 +332,8 @@ func (h *Hub) stopPipelinesLocked() {
 	// failed this time: the display may simply have been asleep).
 	h.codec = ""
 	h.broken = map[string]bool{}
+	h.notice = ""
+	h.noticeOn.Store(false)
 }
 
 // keepRunning runs a capture pipeline until ctx ends. A Go panic inside it
@@ -375,6 +379,7 @@ func (h *Hub) runVideo(ctx context.Context) {
 		backoff = time.Second
 	}
 	next, lastCodec, asleep := 0, "", 0
+	blocked := false
 	for ctx.Err() == nil {
 		h.mu.Lock()
 		codec := h.codec
@@ -434,7 +439,17 @@ func (h *Hub) runVideo(ctx context.Context) {
 		h.frameIsKey = false
 		h.rewriter.restart()
 		h.pktMu.Unlock()
-		err = wsmedia.RunVideo(runCtx, h.cfg.Video, codec, vendor, src, h.log, func(p wsmedia.VideoPacket) {
+		vlog := h.log
+		if blocked {
+			// Retrying every second while a prompt is up: ffmpeg's
+			// complaints were logged the first time.
+			vlog = slog.New(minLevel{h.log.Handler(), slog.LevelError})
+		}
+		err = wsmedia.RunVideo(runCtx, h.cfg.Video, codec, vendor, src, vlog, func(p wsmedia.VideoPacket) {
+			if h.noticeOn.Load() {
+				h.noticeOn.Store(false)
+				safe.Go(h.log, "clear viewer notice", func() { h.setNotice("") })
+			}
 			h.onVideoPacket(track, p)
 		})
 		cancel()
@@ -452,6 +467,29 @@ func (h *Hub) runVideo(ctx context.Context) {
 		produced := h.frames.Load() > before
 		if produced {
 			asleep = 0
+			if blocked {
+				blocked = false
+				h.log.Info("screen capture is back")
+			}
+		}
+		if errors.Is(err, wsmedia.ErrCaptureBlocked) {
+			// Not the encoder's or the codec's fault (switching either
+			// would not help): wait for the prompt to be answered, keeping
+			// the viewers connected and telling them why the picture froze.
+			if !blocked {
+				blocked = true
+				h.log.Warn("Windows is showing an administrator prompt or the lock screen; it has to be answered at the PC. "+
+					"Waiting for it to close", "encoder", wsmedia.EncoderName(codec, vendor))
+			}
+			h.mu.Lock()
+			h.lastErr = blockedNotice
+			h.mu.Unlock()
+			h.setNotice(blockedNotice)
+			wait := time.Second
+			if !h.sleep(ctx, &wait) {
+				return
+			}
+			continue
 		}
 		if errors.Is(err, wsmedia.ErrNoFrames) && asleep < 4 {
 			// A sleeping screen is not the encoder's or the codec's fault:
@@ -462,6 +500,7 @@ func (h *Hub) runVideo(ctx context.Context) {
 			h.mu.Lock()
 			h.lastErr = "The PC's screen is asleep or locked; waking it…"
 			h.mu.Unlock()
+			h.setNotice("The PC's screen is asleep; waking it…")
 			if h.cfg.Wake != nil {
 				h.cfg.Wake()
 			}
@@ -686,6 +725,58 @@ func (h *Hub) codecFailed(codec string) bool {
 	h.switchCodecLocked(next, nil)
 	return true
 }
+
+// blockedNotice is shown to viewers while Windows shows a protected screen.
+const blockedNotice = "The PC is showing a Windows security prompt (usually a game or launcher asking for " +
+	"administrator permission) or the lock screen. Windows only lets someone at the PC answer it; " +
+	"the picture comes back by itself as soon as it closes."
+
+// setNotice tells every viewer what is wrong with the picture ("" clears it).
+func (h *Hub) setNotice(msg string) {
+	h.mu.Lock()
+	if h.notice == msg {
+		h.mu.Unlock()
+		return
+	}
+	h.notice = msg
+	h.noticeOn.Store(msg != "")
+	clients := make([]*Client, 0, len(h.clients))
+	for c := range h.clients {
+		clients = append(clients, c)
+	}
+	h.mu.Unlock()
+	for _, c := range clients {
+		safe.Go(c.log, "send viewer notice", func() {
+			// Send whatever is current by now, so notices that cross
+			// each other still leave the viewer with the latest one.
+			h.mu.Lock()
+			cur := h.notice
+			h.mu.Unlock()
+			_ = c.send(SignalMessage{Type: "notice", Message: cur})
+		})
+	}
+}
+
+// currentNotice is the notice a newly connected viewer should see.
+func (h *Hub) currentNotice() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.notice
+}
+
+// minLevel drops log records below min.
+type minLevel struct {
+	slog.Handler
+	min slog.Level
+}
+
+func (m minLevel) Enabled(ctx context.Context, l slog.Level) bool {
+	return l >= m.min && m.Handler.Enabled(ctx, l)
+}
+func (m minLevel) WithAttrs(a []slog.Attr) slog.Handler {
+	return minLevel{m.Handler.WithAttrs(a), m.min}
+}
+func (m minLevel) WithGroup(n string) slog.Handler { return minLevel{m.Handler.WithGroup(n), m.min} }
 
 func (h *Hub) sleep(ctx context.Context, backoff *time.Duration) bool {
 	select {

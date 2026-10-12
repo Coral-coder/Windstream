@@ -6,7 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,10 +70,17 @@ type e2eOptions struct {
 	// sends NACKs and the hub retransmits (RTX), for this long.
 	dropEvery int
 	hold      time.Duration
+	// ffmpeg, if set, wraps the real ffmpeg (returns the program to run).
+	ffmpeg func(t *testing.T, real string) string
+	// notices receives every "notice" message sent to the viewer.
+	notices chan string
 }
 
 func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder string, opt e2eOptions) {
 	ff := testFFmpeg(t)
+	if opt.ffmpeg != nil {
+		ff = opt.ffmpeg(t, ff)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 
@@ -161,6 +171,10 @@ func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder str
 	pendingCands := []webrtc.ICECandidateInit{}
 	send := func(m SignalMessage) error {
 		switch m.Type {
+		case "notice":
+			if opt.notices != nil {
+				opt.notices <- m.Message
+			}
 		case "offer":
 			if err := browser.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: m.SDP}); err != nil {
 				return err
@@ -304,4 +318,46 @@ func TestHubRetransmitsUnderLoss(t *testing.T) {
 	// while retransmitting video; exercise that path under the race
 	// detector for several seconds.
 	runHubEndToEndWith(t, []string{"h264"}, webrtc.MimeTypeH264, "libx264", e2eOptions{dropEvery: 7, hold: 8 * time.Second})
+}
+
+func TestHubWaitsOutAdministratorPrompt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a shell script")
+	}
+	// The first capture attempts fail the way ddagrab does while Windows
+	// shows a UAC prompt (the Oct 12 log). The viewer must stay connected,
+	// be told why, and get the picture back on the same codec and encoder.
+	wrap := func(t *testing.T, real string) string {
+		dir := t.TempDir()
+		script := filepath.Join(dir, "ffmpeg")
+		body := "#!/bin/sh\n" +
+			"case \"$*\" in *testsrc2*)\n" +
+			"  n=$(cat \"" + dir + "/count\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"" + dir + "/count\"\n" +
+			"  if [ $n -le 3 ]; then\n" +
+			"    echo \"[Parsed_ddagrab_0 @ 0000020df00f0b00] Desktop duplication access denied\" >&2\n" +
+			"    echo \"[fc#0 @ 0000020e345b20c0] Error configuring filter graph: Operation not permitted\" >&2\n" +
+			"    exit 1\n" +
+			"  fi;;\n" +
+			"esac\n" +
+			"exec \"" + real + "\" \"$@\"\n"
+		if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return script
+	}
+	notices := make(chan string, 32)
+	runHubEndToEndWith(t, []string{"h264"}, webrtc.MimeTypeH264, "libx264", e2eOptions{ffmpeg: wrap, notices: notices})
+	var got []string
+	deadline := time.After(3 * time.Second)
+	for len(got) == 0 || got[len(got)-1] != "" {
+		select {
+		case n := <-notices:
+			got = append(got, n)
+		case <-deadline:
+			t.Fatalf("notices %q: want the prompt explained, then cleared", got)
+		}
+	}
+	if !slices.Contains(got, blockedNotice) {
+		t.Errorf("notices %q: viewer was not told about the prompt", got)
+	}
 }

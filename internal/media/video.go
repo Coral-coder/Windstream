@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net"
 	"os/exec"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/pion/rtp"
@@ -25,6 +27,47 @@ type VideoPacket struct {
 // switched off, or Windows is showing the lock screen or a UAC prompt. The
 // encoder itself is fine.
 var ErrNoFrames = errors.New("no picture from the screen (is the display asleep, or the lock screen or an administrator prompt showing?)")
+
+// ErrCaptureBlocked means Windows refused screen capture because it is
+// showing a protected screen: an administrator (UAC) prompt, the lock screen
+// or the Ctrl+Alt+Del screen. Those can only be answered at the PC; capture
+// works again as soon as they close.
+var ErrCaptureBlocked = errors.New("Windows is showing a protected screen (an administrator prompt or the lock screen)")
+
+// captureWatch scans ffmpeg's log for the signs of a blocked capture.
+type captureWatch struct {
+	mu      sync.Mutex
+	tail    string
+	blocked bool
+}
+
+var blockedCaptureSigns = []string{
+	"desktop duplication access denied",
+	"dda releaseframe failed",
+	"acquirenextframe failed",
+}
+
+func (w *captureWatch) Write(b []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s := w.tail + strings.ToLower(string(b))
+	for _, sign := range blockedCaptureSigns {
+		if strings.Contains(s, sign) {
+			w.blocked = true
+		}
+	}
+	if len(s) > 64 {
+		s = s[len(s)-64:] // a sign split across two writes
+	}
+	w.tail = s
+	return len(b), nil
+}
+
+func (w *captureWatch) Blocked() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.blocked
+}
 
 // RunVideo starts ffmpeg and calls onPacket for every RTP packet until the
 // context is cancelled or ffmpeg exits. It returns nil only on cancellation.
@@ -50,9 +93,10 @@ func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src So
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start ffmpeg: %w", err)
 	}
+	watch := &captureWatch{}
 	stderrDone := make(chan struct{})
 	go func() {
-		logStderr(stderr, log.With("pipeline", "video", "encoder", EncoderName(codec, vendor)))
+		logStderr(io.TeeReader(stderr, watch), log.With("pipeline", "video", "encoder", EncoderName(codec, vendor)))
 		close(stderrDone)
 	}()
 	exited := make(chan error, 1)
@@ -79,6 +123,9 @@ func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src So
 			if errors.As(err, &ne) && ne.Timeout() && ctx.Err() == nil {
 				_ = cmd.Process.Kill()
 				<-exited
+				if watch.Blocked() {
+					return ErrCaptureBlocked
+				}
 				return ErrNoFrames
 			}
 			break
@@ -102,6 +149,9 @@ func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src So
 	waitErr := <-exited
 	if ctx.Err() != nil {
 		return nil
+	}
+	if watch.Blocked() {
+		return ErrCaptureBlocked
 	}
 	if waitErr != nil {
 		return fmt.Errorf("ffmpeg exited: %w", waitErr)

@@ -63,3 +63,25 @@ func TestBuildAudioArgs(t *testing.T) {
 		t.Errorf("wasapi args wrong: %s", j)
 	}
 }
+
+func TestCaptureWatchSeesBlockedCapture(t *testing.T) {
+	// Real lines from a Windows log while a UAC prompt was showing; ffmpeg
+	// writes in arbitrary chunks, so a sign may be split.
+	for _, line := range []string{
+		"[Parsed_ddagrab_0 @ 0000020df00f0b00] Desktop duplication access denied\n",
+		"[Parsed_ddagrab_0 @ 0000019b68a383c0] DDA ReleaseFrame failed!\n",
+	} {
+		w := &captureWatch{}
+		mid := len(line) / 2
+		_, _ = w.Write([]byte(line[:mid]))
+		_, _ = w.Write([]byte(line[mid:]))
+		if !w.Blocked() {
+			t.Errorf("not recognised: %q", line)
+		}
+	}
+	w := &captureWatch{}
+	_, _ = w.Write([]byte("[h264_nvenc @ 01] OpenEncodeSessionEx failed: out of memory (10)\n"))
+	if w.Blocked() {
+		t.Error("an encoder failure taken for a blocked capture")
+	}
+}

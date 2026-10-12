@@ -145,6 +145,9 @@ func (h *Hub) Connect(user, ip string, send func(SignalMessage) error) (*Client,
 		c.Close()
 		return nil, err
 	}
+	if n := h.currentNotice(); n != "" {
+		_ = send(SignalMessage{Type: "notice", Message: n})
+	}
 	c.helloTimer.Store(time.AfterFunc(helloTimeout, func() {
 		defer safe.Recover(c.log, "hello timeout")
 		if err := c.start(nil); err != nil && !errors.Is(err, errStarted) {

@@ -198,6 +198,10 @@ async function handleSignal(msg) {
       state.fatalError = msg.message;
       setStatus(msg.message);
       break;
+    case 'notice': // why the picture is frozen right now ('' = it is back)
+      state.notice = msg.message || '';
+      if (!state.pc || state.pc.connectionState === 'connected') setStatus(state.notice);
+      break;
   }
 }
 
@@ -237,7 +241,7 @@ function createPeer(iceServers) {
   };
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
-    if (s === 'connected') { setStatus(''); state.reconnectDelay = 1000; }
+    if (s === 'connected') { setStatus(state.notice || ''); state.reconnectDelay = 1000; }
     else if (s === 'connecting') setStatus('Negotiating media…');
     else if (s === 'failed') { setStatus('Connection failed. Retrying…'); if (state.ws) state.ws.close(); }
     else if (s === 'disconnected') setStatus('Connection interrupted…');
@@ -255,7 +259,7 @@ function onChannelMessage(data) {
 
 function teardownPeer() {
   if (state.pc) { try { state.pc.close(); } catch { /* ignore */ } }
-  state.pc = null; state.control = null; state.motion = null;
+  state.pc = null; state.control = null; state.motion = null; state.notice = '';
   ui.video.srcObject = null; ui.audio.srcObject = null;
 }
 
