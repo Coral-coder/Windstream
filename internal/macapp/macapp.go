@@ -8,7 +8,7 @@ package macapp
 import (
 	"fmt"
 	"html"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -21,10 +21,11 @@ const (
 
 // BundlePath returns the .app bundle that contains executable exe.
 func BundlePath(exe string) (string, bool) {
-	macOSDir := filepath.Dir(exe)
-	contents := filepath.Dir(macOSDir)
-	bundle := filepath.Dir(contents)
-	if filepath.Base(macOSDir) != "MacOS" || filepath.Base(contents) != "Contents" || !strings.HasSuffix(bundle, ".app") {
+	// macOS paths (slash-separated) whatever OS this is compiled for.
+	macOSDir := path.Dir(exe)
+	contents := path.Dir(macOSDir)
+	bundle := path.Dir(contents)
+	if path.Base(macOSDir) != "MacOS" || path.Base(contents) != "Contents" || !strings.HasSuffix(bundle, ".app") {
 		return "", false
 	}
 	return bundle, true
@@ -51,7 +52,7 @@ func AgentPlist(exe, logDir string) string {
 	<key>StandardErrorPath</key><string>%s</string>
 </dict>
 </plist>
-`, Label, esc(exe), esc(filepath.Join(logDir, "agent.log")), esc(filepath.Join(logDir, "agent.log")))
+`, Label, esc(exe), esc(path.Join(logDir, "agent.log")), esc(path.Join(logDir, "agent.log")))
 }
 
 // InfoPlist is the app bundle's Info.plist.

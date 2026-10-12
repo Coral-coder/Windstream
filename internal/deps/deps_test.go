@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -139,7 +140,8 @@ func TestGunzipTo(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, err := os.Stat(filepath.Join(bin, "ffmpeg"))
-	if err != nil || st.Mode().Perm()&0o100 == 0 {
+	// Windows has no executable bit.
+	if err != nil || (runtime.GOOS != "windows" && st.Mode().Perm()&0o100 == 0) {
 		t.Fatalf("not installed executable: %v %v", st, err)
 	}
 }
