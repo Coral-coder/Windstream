@@ -22,9 +22,11 @@ import (
 
 	"github.com/coral-coder/windstream/internal/auth"
 	"github.com/coral-coder/windstream/internal/config"
+	"github.com/coral-coder/windstream/internal/control"
 	"github.com/coral-coder/windstream/internal/display"
 	"github.com/coral-coder/windstream/internal/input"
 	"github.com/coral-coder/windstream/internal/media"
+	"github.com/coral-coder/windstream/internal/power"
 	"github.com/coral-coder/windstream/internal/server"
 	"github.com/coral-coder/windstream/internal/stream"
 )
@@ -159,6 +161,8 @@ func hubConfig(cfg *config.Config, disp *display.Manager) stream.Config {
 		WebRTC:       cfg.WebRTC,
 		Input:        inputOptions(cfg),
 		InputEnabled: cfg.Input.Enabled,
+		PointerMap:   control.PointerMap(disp),
+		Wake:         power.WakeDisplay,
 		MaxClients:   cfg.Server.MaxClients,
 	}
 }

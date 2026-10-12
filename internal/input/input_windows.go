@@ -128,6 +128,14 @@ func (w *winInjector) MouseMove(dx, dy int32) error {
 	return sendInput(mouseEvent(mouseInput{dx: dx, dy: dy, flags: mouseeventfMove}))
 }
 
+func (w *winInjector) MouseMoveAbs(x, y int32) error {
+	if !w.opts.Mouse {
+		return nil
+	}
+	return sendInput(mouseEvent(mouseInput{dx: x, dy: y,
+		flags: mouseeventfMove | mouseeventfAbsolute | mouseeventfVirtualDesk}))
+}
+
 func (w *winInjector) MouseButton(button uint8, down bool) error {
 	if !w.opts.Mouse {
 		return nil

@@ -237,6 +237,7 @@ func (p *panel) handleState(w http.ResponseWriter, r *http.Request) {
 	resp["users"] = users
 	resp["last_crash"] = p.c.opts.LastCrash
 	resp["config_notice"] = p.c.configNotice
+	resp["sign_ins"] = p.c.signIns.recent()
 	resp["deps"] = p.c.deps.Snapshot()
 	resp["network"] = ns
 	resp["stream"] = p.c.stackStatus()
@@ -393,9 +394,10 @@ func (p *panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusTooManyRequests, "Too many attempts, wait a minute")
 		return
 	}
-	switch p.c.auth.Authenticate(strings.TrimSpace(req.Username), req.Password, req.Code) {
+	name := p.c.auth.Canonical(strings.TrimSpace(req.Username))
+	switch p.c.auth.Authenticate(name, req.Password, req.Code) {
 	case auth.OK:
-		p.setCookie(w, strings.TrimSpace(req.Username))
+		p.setCookie(w, name)
 		jsonOK(w, map[string]bool{"ok": true})
 	case auth.TOTPRequired:
 		jsonErr(w, http.StatusUnauthorized, "totp_required")

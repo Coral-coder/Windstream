@@ -120,3 +120,26 @@ func TestLimiter(t *testing.T) {
 		t.Fatal("window did not reset")
 	}
 }
+
+func TestUsernameIgnoresCase(t *testing.T) {
+	h, err := HashPassword("correct-horse-battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := NewAuthenticator([]User{{Name: "Ararara", PasswordHash: h}}, false)
+	if got := a.Canonical("ararara"); got != "Ararara" {
+		t.Fatalf("Canonical = %q", got)
+	}
+	if a.Authenticate("ARARARA", "correct-horse-battery", "") != OK {
+		t.Fatal("sign-in with different letter case refused")
+	}
+	if a.Authenticate("ararara", "wrong-password-xx", "") == OK {
+		t.Fatal("wrong password accepted")
+	}
+	if !a.HasUser("ararara") || a.HasUser("someone") {
+		t.Fatal("HasUser")
+	}
+	if got := a.Canonical("nobody"); got != "nobody" {
+		t.Fatalf("unknown name changed to %q", got)
+	}
+}

@@ -39,6 +39,7 @@
       <button type="submit">Finish setup</button>
       <p class="error" data-error></p>
     </form>
+    <p class="muted small">Forgot your password? Run <b>Windstream-Reset-Password.exe</b> on this PC (download it from the same page as Windstream). It sets a new password, and a new authenticator if you need one.</p>
   </section>
 </main>
 
@@ -122,6 +123,12 @@
       </details>
       <div class="actions"><button type="submit">Save</button><span class="saved hidden" id="saved">Saved ✓</span><p class="error" data-error></p></div>
     </form>
+  </section>
+
+  <section class="card">
+    <h2>Recent sign-ins</h2>
+    <p class="muted small" id="signins-empty">Nobody has signed in yet.</p>
+    <ul id="signins" class="signins"></ul>
   </section>
 
   <section class="card">

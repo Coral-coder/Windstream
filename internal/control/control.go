@@ -26,6 +26,7 @@ import (
 	"github.com/coral-coder/windstream/internal/input"
 	"github.com/coral-coder/windstream/internal/media"
 	"github.com/coral-coder/windstream/internal/netx"
+	"github.com/coral-coder/windstream/internal/power"
 	"github.com/coral-coder/windstream/internal/server"
 	"github.com/coral-coder/windstream/internal/stream"
 
@@ -71,6 +72,10 @@ type Controller struct {
 
 	mu  sync.Mutex
 	cfg *config.Config
+	// cfgStamp identifies the settings file as last written or read by
+	// us, so a change made by another program (the password reset tool)
+	// is noticed.
+	cfgStamp fileStamp
 	// configNotice explains a settings file that had to be repaired at
 	// startup; the dashboard shows it.
 	configNotice string
@@ -101,11 +106,13 @@ type Controller struct {
 	// identity is a random token the HTTPS server publishes, so the app can
 	// check that its public link reaches this PC and not something else.
 	identity string
+	signIns  *signInLog
 
-	netMu     sync.Mutex
-	netCancel context.CancelFunc
-	netDone   chan struct{}
-	runCtx    context.Context
+	netRestartMu sync.Mutex // serializes restartNetwork
+	netMu        sync.Mutex
+	netCancel    context.CancelFunc
+	netDone      chan struct{}
+	runCtx       context.Context
 }
 
 // New loads (or creates) the configuration in DataDir.
@@ -120,6 +127,7 @@ func New(opts Options) (*Controller, error) {
 		return nil, err
 	}
 	c.identity = hex.EncodeToString(tok[:])
+	c.signIns = newSignInLog(opts.DataDir)
 	def := config.AppDefaults()
 	if opts.Dev {
 		def.Display.Mode = "test"
@@ -156,6 +164,7 @@ func New(opts Options) (*Controller, error) {
 			trimErr(err), what, filepath.Base(backup))
 		opts.Log.Error("settings file repaired", "error", err, "changes", what, "backup", backup)
 	}
+	c.cfgStamp = stampOf(c.cfgPath)
 	if len(cfg.UnknownKeys) > 0 {
 		opts.Log.Warn("ignoring settings this version does not know (from a newer version?)", "keys", cfg.UnknownKeys)
 	}
@@ -195,6 +204,7 @@ func (c *Controller) update(fn func(*config.Config) error) error {
 	if err := next.Save(c.cfgPath); err != nil {
 		return err
 	}
+	c.cfgStamp = stampOf(c.cfgPath)
 	c.cfg = &next
 	c.auth.SetUsers(server.UsersFromConfig(&next), next.Auth.RequireTOTP)
 	return nil
@@ -277,6 +287,15 @@ func (c *Controller) restartHTTPS() {
 	srv, err := server.New(&cfg, nil, c.log, server.Options{
 		Auth: c.auth, Sessions: c.sessions, Limiter: c.limiter, GetCertificate: c.tls.GetCertificate,
 		Identity: c.identity,
+		OnSignIn: c.signIns.add,
+		OnOutsideVisit: func(host string) {
+			c.netMu.Lock()
+			n := c.net
+			c.netMu.Unlock()
+			if n != nil {
+				n.ConfirmFromOutside(host)
+			}
+		},
 	})
 	if err != nil {
 		c.setHTTPSErr(err.Error())
@@ -354,8 +373,12 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	c.log.Info("windstream running", "dashboard", c.PanelURL(), "https_port", c.Config().ListenPort(),
 		"media_udp_port", c.Config().WebRTC.UDPPort, "version", c.opts.Version)
+	watch := time.NewTicker(2 * time.Second)
+	defer watch.Stop()
 	for {
 		select {
+		case <-watch.C:
+			c.reloadAccounts()
 		case <-ctx.Done():
 			c.stopStack()
 			c.httpsMu.Lock()
@@ -384,23 +407,29 @@ func (c *Controller) Run(ctx context.Context) error {
 // restartNetwork (re)creates the router/public-address manager from the
 // current settings; the old one removes its port mappings on the way out.
 func (c *Controller) restartNetwork() {
+	c.netRestartMu.Lock()
+	defer c.netRestartMu.Unlock()
 	c.netMu.Lock()
-	defer c.netMu.Unlock()
-	if c.netCancel != nil {
-		c.netCancel()
+	oldCancel, oldDone := c.netCancel, c.netDone
+	c.netMu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
 		// Let the old manager remove its router mappings before the new one
-		// adds its own (they may be the same ports).
+		// adds its own (they may be the same ports). netMu is not held, so
+		// the dashboard keeps answering meanwhile.
 		select {
-		case <-c.netDone:
+		case <-oldDone:
 		case <-time.After(15 * time.Second):
 		}
 	}
 	cfg := c.Config()
 	ctx, cancel := context.WithCancel(c.runCtx)
 	done := make(chan struct{})
-	c.netCancel, c.netDone = cancel, done
+	var lastMu sync.Mutex // onChange runs from the refresh loop and from visits
 	var last netx.Status
 	n := netx.NewManager(c.log, c.ports(), cfg.Network.UPnP && !c.opts.Dev, cfg.Network.CustomDomain, func(st netx.Status) {
+		lastMu.Lock()
+		defer lastMu.Unlock()
 		c.tls.SetHost(st.Hostname)
 		// Let's Encrypt validates on port 443 only; anywhere else it can
 		// only fail (and repeated failures get the address rate limited).
@@ -418,7 +447,9 @@ func (c *Controller) restartNetwork() {
 	n.SetVerifier(func(ctx context.Context, url string) error {
 		return netx.CheckIdentity(ctx, url, c.identity)
 	})
-	c.net = n
+	c.netMu.Lock()
+	c.net, c.netCancel, c.netDone = n, cancel, done
+	c.netMu.Unlock()
 	safego(c.log, "network", func() {
 		defer close(done)
 		n.Run(ctx)
@@ -464,18 +495,24 @@ func (c *Controller) stopStack() {
 // session and restores the desktop when the last one leaves, so the PC's own
 // screen layout is untouched while nobody is streaming.
 type displayLease struct {
-	mu   sync.Mutex
-	n    int
-	disp *display.Manager
-	ctx  context.Context
+	mu    sync.Mutex
+	n     int
+	disp  *display.Manager
+	ctx   context.Context
+	awake func() // ends the keep-awake request while streaming
 }
 
 func (l *displayLease) acquire(ctx context.Context) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.n == 0 {
+		// A sleeping monitor has nothing to capture: wake it, and keep it
+		// (and the PC) awake while someone is streaming.
+		l.awake = power.KeepAwake()
+		power.WakeDisplay()
 		if err := l.disp.Start(ctx); err != nil {
 			l.disp.Stop()
+			l.awake()
 			return err
 		}
 	}
@@ -492,6 +529,9 @@ func (l *displayLease) release() {
 	l.n--
 	if l.n == 0 {
 		l.disp.Stop()
+		if l.awake != nil {
+			l.awake()
+		}
 	}
 }
 
@@ -542,6 +582,7 @@ func (c *Controller) restartStack(ctx context.Context) {
 	}
 	hcfg := HubConfig(&cfg, disp, c.deps.FFmpegPath(), webrtcCfg)
 	hcfg.Acquire, hcfg.Release = lease.acquire, lease.release
+	hcfg.Wake = power.WakeDisplay
 	hub, err := stream.NewHub(ctx, hcfg, c.log)
 	if err != nil {
 		c.stackErr = "Streaming engine: " + err.Error()
@@ -594,6 +635,7 @@ func HubConfig(cfg *config.Config, disp *display.Manager, ffmpeg string, webrtcC
 		Input: input.Options{Gamepads: cfg.Input.Gamepads, Keyboard: cfg.Input.Keyboard,
 			Mouse: cfg.Input.Mouse, MaxGamepads: cfg.Input.MaxGamepads},
 		InputEnabled: cfg.Input.Enabled,
+		PointerMap:   newPointerMapper(disp).Map,
 		MaxClients:   cfg.Server.MaxClients,
 	}
 }
@@ -645,5 +687,76 @@ func (c *Controller) TrayStatus() string {
 		return "Windstream – ready"
 	default:
 		return "Windstream – setting up"
+	}
+}
+
+type fileStamp struct {
+	mod  time.Time
+	size int64
+}
+
+func stampOf(path string) fileStamp {
+	st, err := os.Stat(path)
+	if err != nil {
+		return fileStamp{}
+	}
+	return fileStamp{st.ModTime(), st.Size()}
+}
+
+// reloadAccounts picks up accounts changed in the settings file by another
+// program (Windstream-Reset-Password.exe) while Windstream is running. Only
+// the accounts are taken from the file; everything else is the dashboard's.
+// Anyone signed in to a changed account is signed out.
+func (c *Controller) reloadAccounts() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	stamp := stampOf(c.cfgPath)
+	if stamp == (fileStamp{}) || stamp == c.cfgStamp {
+		return
+	}
+	c.cfgStamp = stamp
+	disk, err := config.Load(c.cfgPath)
+	if err != nil {
+		c.log.Warn("settings file changed outside Windstream but cannot be read; keeping the current accounts", "error", err)
+		return
+	}
+	before := map[string]config.User{}
+	for _, u := range c.cfg.Users {
+		before[u.Name] = u
+	}
+	changed := false
+	for _, u := range disk.Users {
+		if old, ok := before[u.Name]; !ok || old != u {
+			changed = true
+			c.revokeUser(u.Name)
+		}
+		delete(before, u.Name)
+	}
+	for name := range before { // removed
+		changed = true
+		c.revokeUser(name)
+	}
+	if !changed {
+		return
+	}
+	next := *c.cfg
+	next.Users = append([]config.User(nil), disk.Users...)
+	if err := next.Validate(); err != nil {
+		c.log.Warn("accounts changed outside Windstream are not valid; ignoring them", "error", err)
+		return
+	}
+	c.cfg = &next
+	c.auth.SetUsers(server.UsersFromConfig(&next), next.Auth.RequireTOTP)
+	c.limiter.Reset()
+	if c.panel != nil {
+		c.panel.limiter.Reset()
+	}
+	c.log.Info("accounts updated from the settings file (password reset)", "accounts", len(next.Users))
+}
+
+func (c *Controller) revokeUser(name string) {
+	c.sessions.RevokeUser(name)
+	if c.panel != nil {
+		c.panel.sessions.RevokeUser(name)
 	}
 }

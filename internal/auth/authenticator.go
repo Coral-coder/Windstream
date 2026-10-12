@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -63,6 +64,7 @@ func (a *Authenticator) Count() int {
 
 // Authenticate checks username/password and, when configured, a TOTP code.
 func (a *Authenticator) Authenticate(username, password, code string) Result {
+	username = a.Canonical(username)
 	a.umu.RLock()
 	u, ok := a.users[username]
 	requireTOTP := a.requireTOTP
@@ -97,10 +99,34 @@ func (a *Authenticator) Authenticate(username, password, code string) Result {
 	return OK
 }
 
-// HasUser reports whether username is configured.
+// HasUser reports whether username is configured (in any letter case).
 func (a *Authenticator) HasUser(username string) bool {
 	a.umu.RLock()
 	defer a.umu.RUnlock()
-	_, ok := a.users[username]
+	_, ok := a.lookupLocked(username)
 	return ok
+}
+
+// Canonical returns the account name as configured for username, matched
+// without regard to letter case (people type "ararara" for "Ararara"), or
+// username unchanged when there is no such account.
+func (a *Authenticator) Canonical(username string) string {
+	a.umu.RLock()
+	defer a.umu.RUnlock()
+	if name, ok := a.lookupLocked(username); ok {
+		return name
+	}
+	return username
+}
+
+func (a *Authenticator) lookupLocked(username string) (string, bool) {
+	if _, ok := a.users[username]; ok {
+		return username, true
+	}
+	for name := range a.users {
+		if strings.EqualFold(name, username) {
+			return name, true
+		}
+	}
+	return "", false
 }

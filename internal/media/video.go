@@ -21,6 +21,11 @@ type VideoPacket struct {
 	Keyframe bool // first packet(s) of an IDR picture
 }
 
+// ErrNoFrames means capture delivered no picture: the display is asleep or
+// switched off, or Windows is showing the lock screen or a UAC prompt. The
+// encoder itself is fine.
+var ErrNoFrames = errors.New("no picture from the screen (is the display asleep, or the lock screen or an administrator prompt showing?)")
+
 // RunVideo starts ffmpeg and calls onPacket for every RTP packet until the
 // context is cancelled or ffmpeg exits. It returns nil only on cancellation.
 func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src Source, log *slog.Logger, onPacket func(VideoPacket)) error {
@@ -61,14 +66,20 @@ func RunVideo(ctx context.Context, cfg VideoConfig, codec, vendor string, src So
 	buf := make([]byte, 1600)
 	var sender *net.UDPAddr
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		// The first frame normally arrives within half a second; a sleeping
+		// display gives none at all, so give up on that sooner.
+		wait := 10 * time.Second
+		if sender == nil {
+			wait = 6 * time.Second
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(wait))
 		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() && ctx.Err() == nil {
 				_ = cmd.Process.Kill()
 				<-exited
-				return errors.New("encoder produced no video for 10s (is the display asleep or the secure desktop showing?)")
+				return ErrNoFrames
 			}
 			break
 		}

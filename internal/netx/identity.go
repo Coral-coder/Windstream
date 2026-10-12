@@ -17,6 +17,14 @@ import (
 // address (usually the router's own web page when a port is not forwarded).
 const IdentityPath = "/.well-known/windstream-id"
 
+// ForeignAnswerError means a server answered at the address, but it is not
+// this Windstream: typically the router's own web page or API holding that
+// port. Unlike no answer at all, this cannot be the router merely failing
+// to loop back to itself.
+type ForeignAnswerError struct{ msg string }
+
+func (e *ForeignAnswerError) Error() string { return e.msg }
+
 // CheckIdentity reports whether baseURL reaches the server holding token.
 // Certificates are not verified (the public one may not be issued yet);
 // only the token is sent back, never anything secret.
@@ -39,7 +47,7 @@ func CheckIdentity(ctx context.Context, baseURL, token string) error {
 		var tlsErr *tls.RecordHeaderError
 		switch {
 		case errors.As(err, &tlsErr):
-			return errors.New("another device answered at this address (it does not speak HTTPS on this port); the port is not forwarded to this PC")
+			return &ForeignAnswerError{"another device answered at this address (it does not speak HTTPS on this port); the port is not forwarded to this PC"}
 		case errors.As(err, &ne) && ne.Timeout(), errors.Is(err, context.DeadlineExceeded):
 			return errors.New("nothing answered: the port is not forwarded to this PC, or the router cannot reach its own public address from inside your home")
 		default:
@@ -51,7 +59,7 @@ func CheckIdentity(ctx context.Context, baseURL, token string) error {
 	if resp.StatusCode == http.StatusOK && subtle.ConstantTimeCompare([]byte(strings.TrimSpace(string(body))), []byte(token)) == 1 {
 		return nil
 	}
-	return fmt.Errorf("another device answered instead of Windstream (HTTP %d), usually the router's own web page: the port is not forwarded to this PC", resp.StatusCode)
+	return &ForeignAnswerError{fmt.Sprintf("another device answered instead of Windstream (HTTP %d): usually the router itself, because it keeps this port or cannot loop its internet address back to devices at home", resp.StatusCode)}
 }
 
 func trimNetErr(err error) string {

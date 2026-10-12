@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,6 +75,11 @@ type Client struct {
 	helloTimer atomic.Pointer[time.Timer]
 	closeOnce  sync.Once
 	done       chan struct{}
+
+	// Failed input is logged at most every 10 seconds.
+	injMu         sync.Mutex
+	injLast       time.Time
+	injSuppressed int
 }
 
 // helloTimeout is how long the server waits for the browser to list its
@@ -340,7 +346,7 @@ func (c *Client) onInput(dc *webrtc.DataChannel, data []byte) {
 	// Only high-rate motion is rate limited (an 8 kHz gaming mouse can
 	// exceed it): a dropped key or button release would leave it stuck.
 	switch m.Type {
-	case protocol.MsgMouseMove, protocol.MsgMouseWheel, protocol.MsgGamepadState:
+	case protocol.MsgMouseMove, protocol.MsgMouseAbs, protocol.MsgMouseWheel, protocol.MsgGamepadState:
 		if !c.limiter.Allow() {
 			if n := c.dropped.Add(1); n == 1 || n%1000 == 0 {
 				c.log.Warn("input rate limit exceeded; dropping motion messages", "dropped", n)
@@ -362,14 +368,41 @@ func (c *Client) onInput(dc *webrtc.DataChannel, data []byte) {
 		err = c.inj.Key(m.Key, m.Down)
 	case protocol.MsgMouseMove:
 		err = c.inj.MouseMove(int32(m.DX), int32(m.DY))
+	case protocol.MsgMouseAbs:
+		if pm := c.hub.cfg.PointerMap; pm != nil {
+			if x, y, ok := pm(m.X, m.Y); ok {
+				err = c.inj.MouseMoveAbs(x, y)
+			}
+		}
 	case protocol.MsgMouseButton:
 		err = c.inj.MouseButton(m.Button, m.Down)
 	case protocol.MsgMouseWheel:
 		err = c.inj.MouseWheel(int32(m.DX), int32(m.DY))
 	}
 	if err != nil {
-		c.log.Warn("input injection failed", "type", fmt.Sprintf("%#x", m.Type), "error", err)
+		c.noteInjectErr(m.Type, err)
 	}
+}
+
+// noteInjectErr logs failed input at most every 10 seconds: while Windows
+// shows a protected screen every mouse move fails, hundreds per second.
+func (c *Client) noteInjectErr(typ byte, err error) {
+	c.injMu.Lock()
+	defer c.injMu.Unlock()
+	if time.Since(c.injLast) < 10*time.Second {
+		c.injSuppressed++
+		return
+	}
+	attrs := []any{"type", fmt.Sprintf("%#x", typ), "error", err}
+	if c.injSuppressed > 0 {
+		attrs = append(attrs, "more_failures", c.injSuppressed)
+	}
+	msg := "input injection failed"
+	if strings.Contains(err.Error(), "Access is denied") {
+		msg = "Windows is showing a screen Windstream cannot control (an administrator prompt, the lock screen, or a program running as administrator); input is ignored until it closes"
+	}
+	c.log.Warn(msg, attrs...)
+	c.injLast, c.injSuppressed = time.Now(), 0
 }
 
 // drainRTCP reads and discards RTCP from a sender so the interceptors keep

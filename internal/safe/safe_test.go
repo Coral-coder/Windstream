@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestRecover(t *testing.T) {
@@ -29,9 +30,17 @@ func TestRecover(t *testing.T) {
 		defer Recover(nil, "nil logger")
 		panic("x")
 	}()
-	mu.Lock()
-	out := buf.String()
-	mu.Unlock()
+	// The goroutine's own defers (closing done) run before Go's recover
+	// logs the panic, so wait for the line rather than assume it is there.
+	var out string
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		mu.Lock()
+		out = buf.String()
+		mu.Unlock()
+		if strings.Contains(out, "test goroutine") {
+			break
+		}
+	}
 	if !strings.Contains(out, "test goroutine") || !strings.Contains(out, "kaboom") {
 		t.Fatalf("panics not logged: %s", out)
 	}

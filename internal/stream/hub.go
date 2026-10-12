@@ -38,14 +38,21 @@ type Config struct {
 	// Acquire/Release bracket each capture session (first viewer joins ..
 	// last viewer leaves), e.g. to switch the virtual screen on only while
 	// someone is streaming. Optional.
-	Acquire      func(ctx context.Context) error
-	Release      func()
+	Acquire func(ctx context.Context) error
+	Release func()
+	// Wake turns a sleeping display back on. Optional.
+	Wake         func()
 	Audio        wsmedia.AudioConfig
 	AudioEnabled bool
 	WebRTC       config.WebRTC
 	Input        input.Options
 	InputEnabled bool
-	MaxClients   int
+	// PointerMap turns a position on the streamed screen (0..65535 each
+	// way) into one on the whole desktop (see input.MouseMoveAbs); ok is
+	// false while it is unknown. Optional: without it absolute mouse
+	// positions are ignored.
+	PointerMap func(x, y uint16) (dx, dy int32, ok bool)
+	MaxClients int
 	// StopDelay keeps the encoder running briefly after the last client leaves
 	// so a page refresh does not pay the pipeline start-up cost.
 	StopDelay time.Duration
@@ -367,7 +374,7 @@ func (h *Hub) runVideo(ctx context.Context) {
 		}
 		backoff = time.Second
 	}
-	next, lastCodec := 0, ""
+	next, lastCodec, asleep := 0, "", 0
 	for ctx.Err() == nil {
 		h.mu.Lock()
 		codec := h.codec
@@ -376,7 +383,7 @@ func (h *Hub) runVideo(ctx context.Context) {
 			return // pipelines are being stopped
 		}
 		if codec != lastCodec {
-			next, lastCodec = 0, codec
+			next, lastCodec, asleep = 0, codec, 0
 		}
 		candidates := h.encodersFor(ctx, codec)
 		if next >= len(candidates) {
@@ -414,6 +421,9 @@ func (h *Hub) runVideo(ctx context.Context) {
 		h.lastErr = ""
 		h.runCancel = cancel
 		h.mu.Unlock()
+		if h.cfg.Wake != nil {
+			h.cfg.Wake() // a viewer is waiting: the screen must be on
+		}
 		h.log.Info("starting video pipeline", "codec", codec, "encoder", wsmedia.EncoderName(codec, vendor),
 			"test_source", src.Test, "adapter", src.Adapter, "output", src.Output, "fps", h.cfg.Video.FPS,
 			"bitrate_kbps", h.cfg.Video.BitrateKbps)
@@ -440,6 +450,27 @@ func (h *Hub) runVideo(ctx context.Context) {
 			continue
 		}
 		produced := h.frames.Load() > before
+		if produced {
+			asleep = 0
+		}
+		if errors.Is(err, wsmedia.ErrNoFrames) && asleep < 4 {
+			// A sleeping screen is not the encoder's or the codec's fault:
+			// wake it and try again with the same one.
+			asleep++
+			h.log.Warn("no picture from the screen; waking the display and retrying",
+				"encoder", wsmedia.EncoderName(codec, vendor), "attempt", asleep)
+			h.mu.Lock()
+			h.lastErr = "The PC's screen is asleep or locked; waking it…"
+			h.mu.Unlock()
+			if h.cfg.Wake != nil {
+				h.cfg.Wake()
+			}
+			wait := time.Second
+			if !h.sleep(ctx, &wait) {
+				return
+			}
+			continue
+		}
 		h.log.Error("video pipeline stopped", "encoder", wsmedia.EncoderName(codec, vendor), "error", err,
 			"uptime", time.Since(start).Round(time.Millisecond))
 		if !produced {

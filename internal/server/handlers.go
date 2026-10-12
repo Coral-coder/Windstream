@@ -31,6 +31,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := s.clientIP(r)
 	if !s.limiter.Allow(ip) {
 		s.log.Warn("login rate limited", "ip", ip)
+		s.signIn("", ip, "rate_limited")
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited")
 		return
@@ -40,7 +41,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request")
 		return
 	}
-	req.Username = strings.TrimSpace(req.Username)
+	req.Username = s.auth.Canonical(strings.TrimSpace(req.Username))
 	if len(req.Username) > 64 || len(req.Password) > 1024 || len(req.Code) > 16 {
 		writeError(w, http.StatusBadRequest, "bad_request")
 		return
@@ -52,6 +53,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		s.log.Warn("login failed", "user", req.Username, "ip", ip)
+		s.signIn(req.Username, ip, "failed")
 		// Keep failure latency uniform regardless of which check failed.
 		time.Sleep(250 * time.Millisecond)
 		writeError(w, http.StatusUnauthorized, "invalid_credentials")
@@ -72,6 +74,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 	})
 	s.log.Info("login ok", "user", req.Username, "ip", ip)
+	s.signIn(req.Username, ip, "ok")
 	writeJSON(w, http.StatusOK, map[string]any{"user": req.Username})
 }
 

@@ -77,3 +77,10 @@ summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 .danger { border-color: rgba(251,113,133,.35); }
 .danger-btn { background: var(--danger); color: #3f0712; margin-top: 10px; }
 .footer { text-align: center; margin: 4px 0 30px; }
+.signins { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+.signins li { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.signins li:last-child { border-bottom: 0; }
+.signins .ok::before { content: "✓ "; color: var(--ok); }
+.signins .bad::before { content: "✕ "; color: var(--danger); }
+.signins .bad { color: #ffd0d7; }
+.signins time { color: var(--muted); white-space: nowrap; }

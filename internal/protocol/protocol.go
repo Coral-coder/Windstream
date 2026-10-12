@@ -8,6 +8,8 @@
 //	0x20 MouseMove         dx i16, dy i16 (relative)
 //	0x21 MouseButton       button u8, down u8
 //	0x22 MouseWheel        dx i16, dy i16 (notches)
+//	0x23 MouseAbs          x u16, y u16 (position on the streamed screen,
+//	                       0..65535 from left/top to right/bottom)
 //	0x30 Ping              ts u32           -> server replies 0x31 Pong ts u32
 package protocol
 
@@ -27,6 +29,7 @@ const (
 	MsgMouseMove         byte = 0x20
 	MsgMouseButton       byte = 0x21
 	MsgMouseWheel        byte = 0x22
+	MsgMouseAbs          byte = 0x23
 	MsgPing              byte = 0x30
 	MsgPong              byte = 0x31
 )
@@ -76,6 +79,7 @@ type Message struct {
 	Down    bool         // for MsgKey / MsgMouseButton
 	Button  uint8        // for MsgMouseButton
 	DX, DY  int16        // for MsgMouseMove / MsgMouseWheel
+	X, Y    uint16       // for MsgMouseAbs
 	Ping    uint32       // for MsgPing
 }
 
@@ -130,6 +134,12 @@ func Decode(b []byte) (Message, error) {
 		}
 		m.DX = int16(binary.LittleEndian.Uint16(b[1:]))
 		m.DY = int16(binary.LittleEndian.Uint16(b[3:]))
+	case MsgMouseAbs:
+		if len(b) < 5 {
+			return m, ErrShort
+		}
+		m.X = binary.LittleEndian.Uint16(b[1:])
+		m.Y = binary.LittleEndian.Uint16(b[3:])
 	case MsgMouseButton:
 		if len(b) < 3 {
 			return m, ErrShort

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coral-coder/windstream/internal/safe"
@@ -183,6 +184,10 @@ func logStderr(r io.Reader, log *slog.Logger) {
 		if line == "" {
 			continue
 		}
+		if harmlessFFmpegLine(line) {
+			log.Debug("ffmpeg: " + line)
+			continue
+		}
 		if time.Since(window) > 10*time.Second {
 			if dropped > 0 {
 				log.Warn("ffmpeg: further messages suppressed", "count", dropped)
@@ -305,4 +310,21 @@ func oggPage(serial uint32, seq uint32, packets ...[]byte) []byte {
 	binary.LittleEndian.PutUint32(hdr[18:], seq)
 	hdr[26] = byte(len(lacing))
 	return append(append(hdr, lacing...), body...)
+}
+
+// harmlessFFmpegLines are informational messages ffmpeg prints as warnings
+// during normal streaming.
+var harmlessFFmpegLines = []string{
+	"Guessed Channel Layout",
+	"frames duplicated", // the desktop did not change: frames are repeated
+	"Svt[info]",
+}
+
+func harmlessFFmpegLine(line string) bool {
+	for _, h := range harmlessFFmpegLines {
+		if strings.Contains(line, h) {
+			return true
+		}
+	}
+	return false
 }

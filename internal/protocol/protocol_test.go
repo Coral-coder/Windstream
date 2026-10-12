@@ -67,3 +67,13 @@ func FuzzDecode(f *testing.F) {
 		_, _ = Decode(b)
 	})
 }
+
+func TestMouseAbs(t *testing.T) {
+	m, err := Decode([]byte{MsgMouseAbs, 0xff, 0xff, 0x00, 0x80})
+	if err != nil || m.Type != MsgMouseAbs || m.X != 65535 || m.Y != 32768 {
+		t.Fatalf("got %+v, %v", m, err)
+	}
+	if _, err := Decode([]byte{MsgMouseAbs, 1, 2, 3}); err != ErrShort {
+		t.Fatalf("short message: %v", err)
+	}
+}

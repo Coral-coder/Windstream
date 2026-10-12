@@ -3,7 +3,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 const MSG = { GAMEPAD_STATE: 0x01, GAMEPAD_CONNECT: 0x02, GAMEPAD_DISCONNECT: 0x03,
-  KEY: 0x10, MOUSE_MOVE: 0x20, MOUSE_BUTTON: 0x21, MOUSE_WHEEL: 0x22, PING: 0x30, PONG: 0x31 };
+  KEY: 0x10, MOUSE_MOVE: 0x20, MOUSE_BUTTON: 0x21, MOUSE_WHEEL: 0x22, MOUSE_ABS: 0x23, PING: 0x30, PONG: 0x31 };
 
 const ui = {
   login: $('#login'), form: $('#login-form'), loginBtn: $('#login-btn'), loginError: $('#login-error'),
@@ -172,6 +172,7 @@ async function handleSignal(msg) {
   switch (msg.type) {
     case 'config': {
       state.caps = msg.input || null;
+      updateMouseButton();
       createPeer(msg.iceServers || []);
       break;
     }
@@ -380,7 +381,9 @@ function keyEvent(ev, down) {
   if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
   if (PASSTHROUGH_KEYS.has(ev.code)) return;
   if (ev.repeat) { ev.preventDefault(); return; }
-  if (ev.code === 'Escape' && !state.pointerLocked) return; // let Escape leave fullscreen
+  // Escape leaves fullscreen / releases a captured mouse; with a free mouse
+  // outside fullscreen it goes to the PC like any other key.
+  if (ev.code === 'Escape' && !state.pointerLocked && (state.captureMouse || document.fullscreenElement)) return;
   state.held.add(ev.code);
   sendKey(ev.code, true);
   ev.preventDefault();
@@ -399,8 +402,59 @@ window.addEventListener('blur', releaseAll);
 document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
 
 // ---------- mouse ----------
+// Two modes, switched with the mouse button on the toolbar and remembered
+// on this device:
+//  - captured (default): clicking the video locks the pointer and sends raw
+//    movement, as games expect;
+//  - free: the pointer stays yours, and the PC's cursor goes wherever you
+//    point on the video (like remote desktop); clicks and scrolling go with it.
+state.captureMouse = (() => { try { return localStorage.getItem('ws.captureMouse') !== '0'; } catch { return true; } })();
+const mouseAllowed = () => !!(state.active && state.caps && state.caps.mouse);
+function updateMouseButton() {
+  const b = $('#btn-mouse');
+  b.classList.toggle('hidden', !mouseAllowed());
+  b.classList.toggle('on', state.captureMouse);
+  b.setAttribute('aria-pressed', String(state.captureMouse));
+  b.title = state.captureMouse
+    ? 'Mouse capture is on: click the video to lock the mouse (Esc releases it). Click to turn off.'
+    : 'Mouse capture is off: the PC cursor follows your pointer over the video. Click to turn on.';
+}
+$('#btn-mouse').addEventListener('click', (ev) => {
+  ev.stopPropagation();
+  state.captureMouse = !state.captureMouse;
+  try { localStorage.setItem('ws.captureMouse', state.captureMouse ? '1' : '0'); } catch { /* private mode */ }
+  if (!state.captureMouse && state.pointerLocked) document.exitPointerLock();
+  updateMouseButton();
+  toast(state.captureMouse ? 'Mouse capture on: click the video to lock the mouse' : 'Mouse capture off: the PC cursor follows your pointer');
+});
+updateMouseButton();
+
+// videoPoint returns where ev is on the picture (0..65535 each way), or null
+// outside it (the video is letterboxed to keep its shape).
+function videoPoint(ev) {
+  const v = ui.video, r = v.getBoundingClientRect();
+  if (!v.videoWidth || !v.videoHeight || !r.width || !r.height) return null;
+  const s = Math.min(r.width / v.videoWidth, r.height / v.videoHeight);
+  const w = v.videoWidth * s, h = v.videoHeight * s;
+  const x = (ev.clientX - r.left - (r.width - w) / 2) / w;
+  const y = (ev.clientY - r.top - (r.height - h) / 2) / h;
+  if (x < 0 || y < 0 || x > 1 || y > 1) return null;
+  return [Math.round(x * 65535), Math.round(y * 65535)];
+}
+// sendPoint moves the PC cursor to ev's spot; false when ev is off the picture.
+function sendPoint(ev) {
+  const p = videoPoint(ev);
+  if (!p) return false;
+  const dv = new DataView(new ArrayBuffer(5));
+  dv.setUint8(0, MSG.MOUSE_ABS); dv.setUint16(1, p[0], true); dv.setUint16(3, p[1], true);
+  sendMotion(dv.buffer);
+  return true;
+}
+const freeMouse = () => !state.captureMouse && !state.pointerLocked && mouseAllowed();
+ui.stage.addEventListener('pointermove', (ev) => { if (freeMouse()) sendPoint(ev); });
+
 ui.stage.addEventListener('click', () => {
-  if (state.caps && state.caps.mouse && !state.pointerLocked && ui.stage.requestPointerLock) {
+  if (state.captureMouse && state.caps && state.caps.mouse && !state.pointerLocked && ui.stage.requestPointerLock) {
     ui.stage.requestPointerLock({ unadjustedMovement: true }).catch?.(() => ui.stage.requestPointerLock());
   }
 });
@@ -430,7 +484,7 @@ function sendMove(ev) {
 ui.stage.addEventListener(RAW_POINTER ? 'pointerrawupdate' : 'mousemove', sendMove);
 function mouseButton(ev, down) {
   if (down) {
-    if (!state.pointerLocked) return;
+    if (!state.pointerLocked && !(freeMouse() && sendPoint(ev))) return;
     state.buttons.add(ev.button);
   } else if (!state.buttons.delete(ev.button)) {
     return;
@@ -442,7 +496,7 @@ ui.stage.addEventListener('mousedown', (ev) => mouseButton(ev, true));
 window.addEventListener('mouseup', (ev) => mouseButton(ev, false));
 ui.stage.addEventListener('contextmenu', (ev) => ev.preventDefault());
 ui.stage.addEventListener('wheel', (ev) => {
-  if (!state.pointerLocked) return;
+  if (!state.pointerLocked && !(freeMouse() && videoPoint(ev))) return;
   ev.preventDefault();
   const dv = new DataView(new ArrayBuffer(5));
   dv.setUint8(0, MSG.MOUSE_WHEEL);
@@ -452,6 +506,14 @@ ui.stage.addEventListener('wheel', (ev) => {
 }, { passive: false });
 
 // ---------- toolbar ----------
+let toastTimer = 0;
+function toast(text) {
+  const t = $('#toast');
+  t.textContent = text;
+  t.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), 2500);
+}
 $('#btn-fullscreen').addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();
   else ui.stream.requestFullscreen({ navigationUI: 'hide' }).catch(() => {});

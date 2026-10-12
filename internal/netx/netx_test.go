@@ -76,6 +76,9 @@ func (f *fakeIGD) AddPortMappingCtx(_ context.Context, _ string, ext uint16, pro
 	f.maps[proto+":"+itoa(ext)] = lease
 	return nil
 }
+func (f *fakeIGD) GetSpecificPortMappingEntryCtx(context.Context, string, uint16, string) (uint16, string, bool, string, uint32, error) {
+	return 0, "", false, "", 0, errString("714 NoSuchEntryInArray")
+}
 func (f *fakeIGD) DeletePortMappingCtx(_ context.Context, _ string, ext uint16, proto string) error {
 	delete(f.maps, proto+":"+itoa(ext))
 	return nil

@@ -218,10 +218,20 @@ function renderDash(s) {
   link.href = s.link || '#';
   $('#link-qr').classList.toggle('hidden', !s.link_qr);
   if (s.link_qr) $('#link-qr').src = s.link_qr;
-  $('#lan-line').textContent = n.lan_url && n.lan_url !== s.link ? `On your home Wi-Fi you can also use ${n.lan_url} (your browser will show a certificate warning for this one).` : '';
+  let lanLine = '';
+  if (n.public_url && s.link !== n.public_url) {
+    lanLine = `This link works on your home network. Away from home, try ${n.public_url} on your phone with Wi-Fi off: this PC can't test that one from inside your home, but once it's used from outside, Windstream confirms it here.`;
+  } else if (n.lan_url && n.lan_url !== s.link) {
+    lanLine = n.seen_from_outside
+      ? `✓ Confirmed working from outside your home. On your home Wi-Fi use ${n.lan_url} (your browser will show a certificate warning for this one).`
+      : `On your home Wi-Fi you can also use ${n.lan_url} (your browser will show a certificate warning for this one).`;
+  }
+  $('#lan-line').textContent = lanLine;
   const warn = $('#net-warn');
   let w = '';
   if (n.cgnat) w = "Your internet provider shares your public IP with other customers (CGNAT), so this PC can't be reached directly from outside. It works on your home network; for outside access ask your ISP for a public IP.";
+  else if (n.public_check === 'failed' && n.public_check_foreign && n.upnp === 'mapped') w = `When this PC opens its own internet link (${n.public_url}), your router answers itself instead (that's the "no-man zone" page). Many routers do this for devices at home, so the link may still work from outside: try it on your phone with Wi-Fi off.`;
+  else if (n.public_check === 'failed' && n.public_check_foreign) w = `At your internet address (${n.public_url}) another device answers instead of this PC, usually the router's own page (for example a "no-man zone" error). Make sure the port forwards under "Internet access" point to this PC. Windstream re-checks every few minutes.`;
   else if (n.public_check === 'failed' && n.upnp === 'mapped') w = `Your router opened the ports, but this PC can't reach its own internet link (${n.public_url}). Many routers can't loop back to themselves, so it should still work from outside your home: try it on your phone with Wi-Fi off. At home, use ${n.lan_url}.`;
   else if (n.public_check === 'failed') w = `Your internet link (${n.public_url}) doesn't reach this PC yet: ${n.public_check_detail || 'something else answered'}. Until it does, the link below only works on your home network. Add the port forwards shown under "Internet access" (Windstream re-checks every few minutes).`;
   else if (n.upnp && n.upnp !== 'mapped' && n.upnp !== 'disabled') w = 'Automatic router setup failed. Add the port forwards shown under "Internet access" so the link works outside your home.';
@@ -234,6 +244,7 @@ function renderDash(s) {
   cnote.textContent = s.config_notice || '';
   cnote.classList.toggle('hidden', !s.config_notice);
 
+  renderSignIns(s.sign_ins || []);
   renderDeps(s.deps || []);
   const st = s.stream || {};
   const err = (s.https_error && `HTTPS server: ${s.https_error}`) || st.error || (st.stats && st.stats.error);
@@ -310,3 +321,32 @@ $('#btn-logs-copy').addEventListener('click', async () => {
     logsNote('Copy failed; use Download logs instead.', true);
   }
 });
+
+// Who signed in (or tried to): newest first.
+function renderSignIns(list) {
+  const ul = $('#signins');
+  ul.innerHTML = '';
+  $('#signins-empty').classList.toggle('hidden', list.length > 0);
+  for (const e of list.slice(0, 15)) {
+    const li = document.createElement('li');
+    const when = new Date(e.time);
+    const what = e.result === 'ok' ? `${e.user} signed in`
+      : e.result === 'rate_limited' ? 'Too many attempts, blocked for a minute'
+      : `Wrong password or code${e.user ? ` for "${e.user}"` : ''}`;
+    const times = e.count > 1 ? ` (${e.count} times)` : '';
+    const where = isHomeIP(e.ip) ? 'from your home network' : `from ${e.ip}`;
+    const span = document.createElement('span');
+    span.className = e.result === 'ok' ? 'ok' : 'bad';
+    span.textContent = `${what}${times} ${where}`;
+    li.append(span);
+    const t = document.createElement('time');
+    t.dateTime = e.time;
+    t.textContent = when.toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    li.append(t);
+    ul.append(li);
+  }
+}
+
+function isHomeIP(ip) {
+  return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.|::1$|fe80:|f[cd])/i.test(ip || '');
+}

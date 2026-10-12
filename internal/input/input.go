@@ -28,6 +28,9 @@ type Injector interface {
 	GamepadState(idx int, st protocol.GamepadState) error
 	Key(code string, down bool) error
 	MouseMove(dx, dy int32) error
+	// MouseMoveAbs puts the cursor at a point on the whole Windows desktop,
+	// in 0..65535 from its left/top edge to its right/bottom edge.
+	MouseMoveAbs(x, y int32) error
 	MouseButton(button uint8, down bool) error
 	MouseWheel(dx, dy int32) error
 	// Close releases every key, button and virtual controller this client
@@ -43,6 +46,7 @@ func (Noop) GamepadDisconnect(int) error                   { return nil }
 func (Noop) GamepadState(int, protocol.GamepadState) error { return nil }
 func (Noop) Key(string, bool) error                        { return nil }
 func (Noop) MouseMove(int32, int32) error                  { return nil }
+func (Noop) MouseMoveAbs(int32, int32) error               { return nil }
 func (Noop) MouseButton(uint8, bool) error                 { return nil }
 func (Noop) MouseWheel(int32, int32) error                 { return nil }
 func (Noop) Close() error                                  { return nil }

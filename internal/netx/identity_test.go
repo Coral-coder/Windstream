@@ -2,6 +2,7 @@ package netx
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,8 +36,10 @@ func TestCheckIdentity(t *testing.T) {
 	if err := CheckIdentity(ctx, ours.URL, "other"); err == nil {
 		t.Fatal("another Windstream's token accepted")
 	}
-	if err := CheckIdentity(ctx, router.URL, "tok123"); err == nil || !strings.Contains(err.Error(), "HTTP 404") {
-		t.Fatalf("router page accepted or unclear: %v", err)
+	err := CheckIdentity(ctx, router.URL, "tok123")
+	var foreign *ForeignAnswerError
+	if !errors.As(err, &foreign) || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Fatalf("router page accepted or not reported as another server: %v", err)
 	}
 	if err := CheckIdentity(ctx, "https"+strings.TrimPrefix(plain.URL, "http"), "tok123"); err == nil {
 		t.Fatal("plain HTTP server accepted")
@@ -44,8 +47,8 @@ func TestCheckIdentity(t *testing.T) {
 	closed := httptest.NewTLSServer(http.NotFoundHandler())
 	url := closed.URL
 	closed.Close()
-	if err := CheckIdentity(ctx, url, "tok123"); err == nil {
-		t.Fatal("closed port accepted")
+	if err := CheckIdentity(ctx, url, "tok123"); err == nil || errors.As(err, &foreign) {
+		t.Fatalf("closed port accepted or reported as another server: %v", err)
 	}
 }
 
@@ -58,9 +61,13 @@ func TestStatusLink(t *testing.T) {
 	if st.Link() != "https://lan" {
 		t.Error("a public link that reaches something else was handed out")
 	}
-	st.UPnP = "mapped" // likely only the router not looping back
+	st.UPnP = "mapped" // no answer: likely only the router not looping back
 	if st.Link() != "https://pub" {
 		t.Error("mapped public link not used")
+	}
+	st.PublicCheckForeign = true // the router itself answered: broken
+	if st.Link() != "https://lan" {
+		t.Error("public link handed out although another server answers there")
 	}
 	if (Status{LANURL: "https://lan"}).Link() != "https://lan" {
 		t.Error("no LAN fallback")

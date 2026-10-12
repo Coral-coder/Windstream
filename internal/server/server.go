@@ -33,18 +33,20 @@ const sessionCookie = "__Host-windstream"
 
 // Server is the HTTPS front end.
 type Server struct {
-	cfg      *config.Config
-	log      *slog.Logger
-	auth     *auth.Authenticator
-	sessions *auth.SessionStore
-	limiter  *auth.Limiter
-	hub      atomic.Pointer[stream.Hub]
-	handler  http.Handler
-	tlsCfg   *tls.Config
-	acme     *autocert.Manager
-	getCert  func(*tls.ClientHelloInfo) (*tls.Certificate, error)
-	identity string
-	origins  map[string]bool
+	cfg       *config.Config
+	log       *slog.Logger
+	auth      *auth.Authenticator
+	sessions  *auth.SessionStore
+	limiter   *auth.Limiter
+	hub       atomic.Pointer[stream.Hub]
+	handler   http.Handler
+	tlsCfg    *tls.Config
+	acme      *autocert.Manager
+	getCert   func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	identity  string
+	onSignIn  func(SignIn)
+	onOutside func(host string)
+	origins   map[string]bool
 }
 
 // Options lets a long-running host (the desktop app) share state across
@@ -58,6 +60,22 @@ type Options struct {
 	// Identity is served at netx.IdentityPath so the app can confirm that
 	// its public link reaches this server.
 	Identity string
+	// OnSignIn is told about every sign-in attempt (for the dashboard's
+	// list of who signed in). Optional.
+	OnSignIn func(SignIn)
+	// OnOutsideVisit is told the Host a device on the internet (not the
+	// home network) used to reach this server, which proves the public
+	// link works even when the PC cannot test it itself. Optional.
+	OnOutsideVisit func(host string)
+}
+
+// SignIn is one sign-in attempt.
+type SignIn struct {
+	Time   time.Time `json:"time"`
+	User   string    `json:"user"`
+	IP     string    `json:"ip"`
+	Result string    `json:"result"` // "ok", "failed", "rate_limited"
+	Count  int       `json:"count"`  // repeated attempts folded into one entry
 }
 
 // New wires the handlers and TLS configuration. hub may be nil and set later.
@@ -77,14 +95,16 @@ func New(cfg *config.Config, hub *stream.Hub, log *slog.Logger, opts ...Options)
 		o.Limiter = auth.NewLimiter(cfg.Auth.LoginRateLimit, cfg.Auth.LoginRateWindow.Duration)
 	}
 	s := &Server{
-		cfg:      cfg,
-		log:      log,
-		auth:     o.Auth,
-		sessions: o.Sessions,
-		limiter:  o.Limiter,
-		getCert:  o.GetCertificate,
-		identity: o.Identity,
-		origins:  make(map[string]bool),
+		cfg:       cfg,
+		log:       log,
+		auth:      o.Auth,
+		sessions:  o.Sessions,
+		limiter:   o.Limiter,
+		getCert:   o.GetCertificate,
+		identity:  o.Identity,
+		onSignIn:  o.OnSignIn,
+		onOutside: o.OnOutsideVisit,
+		origins:   make(map[string]bool),
 	}
 	s.hub.Store(hub)
 	for _, origin := range cfg.Server.AllowedOrigins {
@@ -290,6 +310,7 @@ func (s *Server) staticHandler() http.Handler {
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.noteOutsideVisit(r)
 		h := w.Header()
 		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
 		h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "+
@@ -365,4 +386,31 @@ func portSuffix(a net.Addr) string {
 		return fmt.Sprintf(":%d", t.Port)
 	}
 	return ""
+}
+
+// noteOutsideVisit reports requests from the internet (judged by the
+// connection itself, never by headers a client could forge).
+func (s *Server) noteOutsideVisit(r *http.Request) {
+	if s.onOutside == nil {
+		return
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !netx.IsPublic(ip) {
+		return
+	}
+	h := r.Host
+	if hh, _, err := net.SplitHostPort(h); err == nil {
+		h = hh
+	}
+	s.onOutside(h)
+}
+
+func (s *Server) signIn(user, ip, result string) {
+	if s.onSignIn != nil {
+		s.onSignIn(SignIn{Time: time.Now(), User: user, IP: ip, Result: result})
+	}
 }

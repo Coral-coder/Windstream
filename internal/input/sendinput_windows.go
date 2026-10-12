@@ -22,17 +22,19 @@ const (
 	keyeventfKeyUp       = 0x0002
 	keyeventfScanCode    = 0x0008
 
-	mouseeventfMove       = 0x0001
-	mouseeventfLeftDown   = 0x0002
-	mouseeventfLeftUp     = 0x0004
-	mouseeventfRightDown  = 0x0008
-	mouseeventfRightUp    = 0x0010
-	mouseeventfMiddleDown = 0x0020
-	mouseeventfMiddleUp   = 0x0040
-	mouseeventfXDown      = 0x0080
-	mouseeventfXUp        = 0x0100
-	mouseeventfWheel      = 0x0800
-	mouseeventfHWheel     = 0x1000
+	mouseeventfMove        = 0x0001
+	mouseeventfLeftDown    = 0x0002
+	mouseeventfLeftUp      = 0x0004
+	mouseeventfRightDown   = 0x0008
+	mouseeventfRightUp     = 0x0010
+	mouseeventfMiddleDown  = 0x0020
+	mouseeventfMiddleUp    = 0x0040
+	mouseeventfXDown       = 0x0080
+	mouseeventfXUp         = 0x0100
+	mouseeventfWheel       = 0x0800
+	mouseeventfHWheel      = 0x1000
+	mouseeventfVirtualDesk = 0x4000
+	mouseeventfAbsolute    = 0x8000
 
 	wheelDelta = 120
 )

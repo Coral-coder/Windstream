@@ -95,6 +95,8 @@ type igd interface {
 		intClient string, enabled bool, desc string, lease uint32) error
 	DeletePortMappingCtx(ctx context.Context, remoteHost string, extPort uint16, proto string) error
 	GetExternalIPAddressCtx(ctx context.Context) (string, error)
+	GetSpecificPortMappingEntryCtx(ctx context.Context, remoteHost string, extPort uint16, proto string) (
+		intPort uint16, intClient string, enabled bool, desc string, lease uint32, err error)
 	LocalAddr() net.IP
 }
 
@@ -194,6 +196,17 @@ func (g *Gateway) Map(ctx context.Context, proto string, extPort, intPort uint16
 		err = g.c.AddPortMappingCtx(ctx, "", extPort, proto, intPort, local.String(), true, desc, 0)
 	}
 	return err
+}
+
+// HasMapping reports whether the router currently forwards extPort to
+// intPort on this PC.
+func (g *Gateway) HasMapping(ctx context.Context, proto string, extPort, intPort uint16) bool {
+	local := g.c.LocalAddr()
+	if local == nil {
+		local = LANIP()
+	}
+	in, client, enabled, _, _, err := g.c.GetSpecificPortMappingEntryCtx(ctx, "", extPort, proto)
+	return err == nil && enabled && in == intPort && local != nil && net.ParseIP(client).Equal(local)
 }
 
 // Unmap removes a mapping.

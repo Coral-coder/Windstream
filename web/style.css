@@ -41,3 +41,7 @@ video { width: 100%; height: 100%; object-fit: contain; background: #000; outlin
 #toolbar button:hover { background: #1d454b; }
 :fullscreen #toolbar { display: none; }
 @media (max-width: 600px) { #toolbar .brand { display: none; } }
+.forgot { font-size: 13px; margin-top: 4px; }
+.toast { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); background: rgba(7,26,31,.9); color: var(--text); padding: 8px 14px; border-radius: 10px; font-size: 14px; pointer-events: none; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; }
+#toolbar button.toggle { opacity: .55; }
+#toolbar button.toggle.on { opacity: 1; box-shadow: inset 0 0 0 1px var(--accent); }

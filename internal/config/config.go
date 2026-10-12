@@ -390,11 +390,11 @@ func validUsers(in []User, requireTOTP bool) []User {
 	var out []User
 	seen := map[string]bool{}
 	for _, u := range in {
-		if u.Name == "" || seen[u.Name] || !strings.HasPrefix(u.PasswordHash, "$argon2id$") ||
+		if u.Name == "" || seen[strings.ToLower(u.Name)] || !strings.HasPrefix(u.PasswordHash, "$argon2id$") ||
 			(requireTOTP && u.TOTPSecret == "") {
 			continue
 		}
-		seen[u.Name] = true
+		seen[strings.ToLower(u.Name)] = true
 		out = append(out, u)
 	}
 	return out
@@ -468,10 +468,10 @@ func (c *Config) Validate() error {
 		if u.Name == "" {
 			add("users[%d].name is empty", i)
 		}
-		if seen[u.Name] {
+		if seen[strings.ToLower(u.Name)] {
 			add("duplicate user %q", u.Name)
 		}
-		seen[u.Name] = true
+		seen[strings.ToLower(u.Name)] = true
 		if !strings.HasPrefix(u.PasswordHash, "$argon2id$") {
 			add("users[%d] (%s): password_hash must be an argon2id hash from `windstream hash-password`", i, u.Name)
 		}

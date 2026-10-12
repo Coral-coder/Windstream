@@ -49,3 +49,11 @@ func (l *Limiter) Sweep() {
 	}
 	l.mu.Unlock()
 }
+
+// Reset forgets every recorded attempt (after a password reset, so the
+// owner is not left locked out by their earlier failed tries).
+func (l *Limiter) Reset() {
+	l.mu.Lock()
+	l.buckets = map[string]*bucket{}
+	l.mu.Unlock()
+}

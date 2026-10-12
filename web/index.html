@@ -21,6 +21,7 @@
     <label id="totp-row" class="hidden">Authenticator code <input name="code" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="6"></label>
     <button type="submit" id="login-btn">Sign in</button>
     <p id="login-error" class="error" role="alert"></p>
+    <p class="muted forgot">Forgot your password? On the gaming PC, run <b>Windstream-Reset-Password.exe</b> (from the same download page as Windstream).</p>
   </form>
 </main>
 
@@ -32,11 +33,13 @@
       <div id="status" class="status">Connecting…</div>
     </div>
     <pre id="stats" class="stats hidden"></pre>
+    <div id="toast" class="toast hidden" role="status"></div>
   </div>
   <nav id="toolbar">
     <span class="brand"><img src="/favicon.png" alt=""> Windstream</span>
     <span id="pads" class="pads" title="Connected controllers">🎮 0</span>
     <span class="spacer"></span>
+    <button id="btn-mouse" class="toggle hidden" aria-pressed="true">🖱</button>
     <button id="btn-mute" title="Toggle audio">🔇</button>
     <button id="btn-stats" title="Toggle stats">📈</button>
     <button id="btn-fullscreen" title="Fullscreen">⛶</button>
