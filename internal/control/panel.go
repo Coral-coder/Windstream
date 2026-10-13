@@ -97,6 +97,7 @@ func (p *panel) routes() http.Handler {
 	mux.HandleFunc("POST /api/users/delete", p.authed(p.handleUserDelete))
 	mux.HandleFunc("POST /api/users/signout", p.authed(p.handleUserSignout))
 	mux.HandleFunc("POST /api/network/refresh", p.authed(p.handleNetRefresh))
+	mux.HandleFunc("POST /api/ports", p.authed(p.handlePorts))
 	mux.HandleFunc("POST /api/uninstall", p.authed(p.handleUninstall))
 	mux.HandleFunc("POST /api/quit", p.authed(p.handleQuit))
 	mux.HandleFunc("GET /api/logs.zip", p.authed(p.handleLogsZip))
@@ -199,6 +200,7 @@ type Settings struct {
 	CustomDomain  string `json:"custom_domain"`
 	MaxClients    int    `json:"max_clients"`
 	HTTPSPort     int    `json:"https_port"`
+	PublicPort    int    `json:"public_port"`
 	MediaPort     int    `json:"media_port"`
 }
 
@@ -210,7 +212,7 @@ func settingsFrom(cfg config.Config) Settings {
 		Audio: cfg.Audio.Enabled, Gamepads: cfg.Input.Gamepads, KeyboardMouse: cfg.Input.Keyboard && cfg.Input.Mouse,
 		LaunchSteam: len(cfg.Display.Launch) > 0 && strings.Contains(strings.ToLower(cfg.Display.Launch[0]), "steam"),
 		UPnP:        cfg.Network.UPnP, CustomDomain: cfg.Network.CustomDomain, MaxClients: cfg.Server.MaxClients,
-		HTTPSPort: cfg.ListenPort(), MediaPort: cfg.WebRTC.UDPPort,
+		HTTPSPort: cfg.ListenPort(), MediaPort: cfg.WebRTC.UDPPort, PublicPort: cfg.Network.HTTPSExternalPort,
 	}
 }
 
@@ -554,6 +556,65 @@ func (p *panel) handleSettings(w http.ResponseWriter, r *http.Request) {
 		p.c.restartNetwork()
 	}
 	p.c.requestRestart()
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
+// handlePorts sets the public port (the one in the link) and the ports
+// Windstream listens on.
+func (p *panel) handlePorts(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PublicPort int `json:"public_port"`
+		HTTPSPort  int `json:"https_port"`
+		MediaPort  int `json:"media_port"`
+	}
+	if err := decode(r, &req); err != nil {
+		jsonErr(w, http.StatusBadRequest, "Bad request")
+		return
+	}
+	for _, port := range []int{req.PublicPort, req.HTTPSPort, req.MediaPort} {
+		if port < 1 || port > 65535 {
+			jsonErr(w, http.StatusBadRequest, "Ports must be between 1 and 65535")
+			return
+		}
+	}
+	cur := p.c.Config()
+	if req.HTTPSPort == cur.Server.PanelPort {
+		jsonErr(w, http.StatusBadRequest, fmt.Sprintf("Port %d is used by this dashboard; pick another", req.HTTPSPort))
+		return
+	}
+	httpsChanged := req.HTTPSPort != cur.ListenPort()
+	mediaChanged := req.MediaPort != cur.WebRTC.UDPPort
+	publicChanged := req.PublicPort != cur.Network.HTTPSExternalPort
+	if httpsChanged && !netx.TCPFree(req.HTTPSPort) {
+		jsonErr(w, http.StatusBadRequest, fmt.Sprintf("TCP port %d is already in use by another program on this computer", req.HTTPSPort))
+		return
+	}
+	if mediaChanged && !netx.UDPFree(req.MediaPort) {
+		jsonErr(w, http.StatusBadRequest, fmt.Sprintf("UDP port %d is already in use by another program on this computer", req.MediaPort))
+		return
+	}
+	if !httpsChanged && !mediaChanged && !publicChanged {
+		jsonOK(w, map[string]bool{"ok": true})
+		return
+	}
+	err := p.c.update(func(c *config.Config) error {
+		c.Server.Listen = fmt.Sprintf(":%d", req.HTTPSPort)
+		c.WebRTC.UDPPort = req.MediaPort
+		c.Network.HTTPSExternalPort = req.PublicPort
+		return nil
+	})
+	if err != nil {
+		jsonErr(w, http.StatusBadRequest, trimErr(err))
+		return
+	}
+	p.c.log.Info("ports changed", "public", req.PublicPort, "https", req.HTTPSPort, "media_udp", req.MediaPort)
+	if httpsChanged {
+		p.c.restartHTTPS()
+	}
+	p.c.restartNetwork() // re-map the router with the new ports
+	if mediaChanged {
+		p.c.requestRestart()
+	}
 	jsonOK(w, map[string]bool{"ok": true})
 }
 

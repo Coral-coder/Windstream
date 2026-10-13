@@ -84,3 +84,5 @@ summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 .signins .bad::before { content: "✕ "; color: var(--danger); }
 .signins .bad { color: #ffd0d7; }
 .signins time { color: var(--muted); white-space: nowrap; }
+.ports { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.ports .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }

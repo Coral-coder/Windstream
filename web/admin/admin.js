@@ -92,7 +92,6 @@ form.addEventListener('submit', (ev) => {
       make_primary: !!fd.get('make_primary'), audio: !!fd.get('audio'), gamepads: !!fd.get('gamepads'),
       keyboard_mouse: !!fd.get('keyboard_mouse'), launch_steam: !!fd.get('launch_steam'),
       upnp: !!fd.get('upnp'), custom_domain: fd.get('custom_domain') || '', max_clients: +fd.get('max_clients') || 2,
-      https_port: +fd.get('https_port') || 0, media_port: +fd.get('media_port') || 0,
     };
     await api('/api/settings', s);
     settingsDirty = false;
@@ -100,6 +99,28 @@ form.addEventListener('submit', (ev) => {
     await refresh();
   });
 });
+
+// Ports live with the network status, where they are checked.
+const portsForm = $('#form-ports');
+let portsDirty = false;
+portsForm.addEventListener('input', () => { portsDirty = true; $('#ports-saved').classList.add('hidden'); });
+portsForm.addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  submitting(portsForm, async (fd) => {
+    await api('/api/ports', {
+      public_port: +fd.get('public_port'), https_port: +fd.get('https_port'), media_port: +fd.get('media_port'),
+    });
+    portsDirty = false;
+    $('#ports-saved').classList.remove('hidden');
+    await refresh();
+  });
+});
+function fillPorts(s) {
+  if (portsDirty || portsForm.contains(document.activeElement)) return;
+  portsForm.public_port.value = s.public_port;
+  portsForm.https_port.value = s.https_port;
+  portsForm.media_port.value = s.media_port;
+}
 
 function syncSettingsUI() {
   $('#bitrate-out').textContent = `${form.bitrate_mbps.value} Mbps`;
@@ -119,8 +140,6 @@ function fillSettings(s) {
   for (const k of ['make_primary', 'audio', 'gamepads', 'keyboard_mouse', 'launch_steam', 'upnp']) form[k].checked = !!s[k];
   form.custom_domain.value = s.custom_domain || '';
   form.max_clients.value = s.max_clients;
-  form.https_port.value = s.https_port;
-  form.media_port.value = s.media_port;
   syncSettingsUI();
 }
 
@@ -293,7 +312,7 @@ function renderDash(s) {
       ? "If the link doesn't work from outside your home, check that your router has these port forwards (and that it is the only router between this PC and the internet):"
       : "Your router didn't accept automatic setup. Add these port forwards in its settings:";
   $('#hostname').textContent = n.hostname || '—';
-  if (s.settings) $('#ports').textContent = `HTTPS ${s.settings.https_port}/TCP · media ${s.settings.media_port}/UDP`;
+  if (s.settings) fillPorts(s.settings);
   $('#forward').classList.toggle('hidden', !(n.forward && n.forward.length));
   const fl = $('#forward-list'); fl.innerHTML = '';
   for (const f of n.forward || []) { const li = document.createElement('li'); li.textContent = f; fl.append(li); }
