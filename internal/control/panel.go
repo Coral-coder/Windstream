@@ -102,6 +102,9 @@ func (p *panel) routes() http.Handler {
 	mux.HandleFunc("GET /api/logs.zip", p.authed(p.handleLogsZip))
 	mux.HandleFunc("POST /api/logs/open", p.authed(p.handleOpenLogs))
 	mux.HandleFunc("POST /api/permission", p.authed(p.handlePermission))
+	mux.HandleFunc("POST /api/update/check", p.authed(p.handleUpdateCheck))
+	mux.HandleFunc("POST /api/update/install", p.authed(p.handleUpdateInstall))
+	mux.HandleFunc("POST /api/update/auto", p.authed(p.handleUpdateAuto))
 	return p.guard(mux)
 }
 
@@ -246,6 +249,7 @@ func (p *panel) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["deps"] = comps
 	resp["platform"] = runtime.GOOS
+	resp["update"] = p.c.updateStatus()
 	resp["network"] = ns
 	resp["stream"] = p.c.stackStatus()
 	resp["https_error"] = p.c.httpsError()
@@ -581,4 +585,38 @@ func (p *panel) handleQuit(w http.ResponseWriter, r *http.Request) {
 	if p.c.opts.Platform != nil {
 		safe.Go(p.c.log, "quit", func() { time.Sleep(300 * time.Millisecond); p.c.opts.Platform.Quit() })
 	}
+}
+
+// ---- updates ----
+
+func (p *panel) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
+	p.c.checkUpdatesNow()
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
+func (p *panel) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
+	up, ok := p.c.updatePlatform()
+	if !ok {
+		jsonErr(w, http.StatusBadRequest, "Updates are not available for this build")
+		return
+	}
+	if st := p.c.updateStatus(); !st.Available {
+		jsonErr(w, http.StatusBadRequest, "Windstream is up to date")
+		return
+	}
+	safego(p.c.log, "install update", func() { _ = p.c.installUpdate(p.c.runCtx, up) })
+	jsonOK(w, map[string]bool{"ok": true})
+}
+
+func (p *panel) handleUpdateAuto(w http.ResponseWriter, r *http.Request) {
+	var req struct{ On bool }
+	if err := decode(r, &req); err != nil {
+		jsonErr(w, http.StatusBadRequest, "Bad request")
+		return
+	}
+	if err := p.c.update(func(c *config.Config) error { c.Updates.Auto = req.On; return nil }); err != nil {
+		jsonErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	jsonOK(w, map[string]bool{"ok": true})
 }

@@ -68,6 +68,7 @@ func performUninstall(removeData, quiet bool) {
 		}
 	}
 	deleteTask()
+	deleteNamedTask(updateTaskName)
 	removeFirewallRule()
 	_ = os.Remove(startMenuLink())
 	_ = registry.DeleteKey(registry.LOCAL_MACHINE, uninstallKey)

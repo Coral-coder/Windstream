@@ -22,6 +22,9 @@ func platformMain(args []string) bool {
 		err = winapp.Launch()
 	case args[0] == "--install":
 		err = winapp.InstallFromArgs(args[1:])
+	case args[0] == "--update":
+		// Started by the update task with a newly downloaded exe.
+		err = winapp.UpdateFromArgs(args[1:])
 	case args[0] == "--run":
 		// Tray + supervisor; the server itself runs in a --worker child
 		// that is restarted automatically if it ever crashes.

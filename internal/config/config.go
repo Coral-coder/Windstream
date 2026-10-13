@@ -44,10 +44,20 @@ type Config struct {
 	Input   Input   `toml:"input"`
 	Log     Log     `toml:"log"`
 	Network Network `toml:"network"`
+	Updates Updates `toml:"updates"`
 
 	// UnknownKeys lists settings in the file this version does not know,
 	// e.g. written by a newer Windstream. They are ignored, not fatal.
 	UnknownKeys []string `toml:"-"`
+}
+
+// Updates configures updating from the project's GitHub releases (desktop
+// app).
+type Updates struct {
+	// Auto installs new versions by itself while nobody is streaming. On
+	// macOS updates are only offered: the user installs them (see
+	// macapp.UnattendedUpdates).
+	Auto bool `toml:"auto"`
 }
 
 // Network configures automatic internet reachability (desktop app).
@@ -252,6 +262,7 @@ func Default() Config {
 		Input:   Input{Enabled: true, Gamepads: true, Keyboard: true, Mouse: true, MaxGamepads: 4},
 		Log:     Log{Level: "info", Format: "text"},
 		Network: Network{UPnP: true, HTTPSExternalPort: 443},
+		Updates: Updates{Auto: true},
 	}
 }
 

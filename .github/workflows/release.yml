@@ -106,6 +106,8 @@ jobs:
 
           It asks for administrator permission once, installs itself, and opens the setup page in your browser.
 
+          **Already installed?** Nothing to download: Windstream checks for new versions every few hours and installs them by itself while nobody is playing (dashboard → Updates, where you can also update right away or turn this off). On a Mac, the dashboard offers each update with an **Update now** button.
+
           **Mac:** download `Windstream-macOS.zip`, open it and double-click **Windstream**. The first time, macOS says it can't check the app: open **System Settings → Privacy & Security** and click **Open Anyway**. Windstream installs itself in Applications, then asks for **Screen Recording** and **Accessibility** permission (needed to stream the screen and to control the mouse and keyboard). For sound, install the free BlackHole 2ch driver (the dashboard explains how).
 
           **Forgot your password?** Download `Windstream-Reset-Password.exe` (or `-arm64`) and run it on the same PC. It sets a new password, and a new authenticator if you lost that too. Windstream picks the change up within seconds, without a restart.

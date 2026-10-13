@@ -37,10 +37,12 @@ func withTaskFolder(fn func(folder *ole.IDispatch) error) error {
 	})
 }
 
-func registerTaskXML(xml string) error {
+func registerTaskXML(xml string) error { return registerNamedTask(taskName, xml) }
+
+func registerNamedTask(name, xml string) error {
 	return withTaskFolder(func(folder *ole.IDispatch) error {
 		empty := ole.NewVariant(ole.VT_EMPTY, 0)
-		task, err := call(folder, "RegisterTask", taskName, xml, int32(taskCreateOrUpdate),
+		task, err := call(folder, "RegisterTask", name, xml, int32(taskCreateOrUpdate),
 			&empty, &empty, int32(taskLogonInteractiveToken), &empty)
 		if task != nil {
 			task.Release()
@@ -49,9 +51,11 @@ func registerTaskXML(xml string) error {
 	})
 }
 
-func withTask(fn func(task *ole.IDispatch) error) error {
+func withTask(fn func(task *ole.IDispatch) error) error { return withNamedTask(taskName, fn) }
+
+func withNamedTask(name string, fn func(task *ole.IDispatch) error) error {
 	return withTaskFolder(func(folder *ole.IDispatch) error {
-		task, err := call(folder, "GetTask", taskName)
+		task, err := call(folder, "GetTask", name)
 		if err != nil {
 			return err
 		}
@@ -60,8 +64,10 @@ func withTask(fn func(task *ole.IDispatch) error) error {
 	})
 }
 
-func runTask() error {
-	return withTask(func(task *ole.IDispatch) error {
+func runTask() error { return runNamedTask(taskName) }
+
+func runNamedTask(name string) error {
+	return withNamedTask(name, func(task *ole.IDispatch) error {
 		empty := ole.NewVariant(ole.VT_EMPTY, 0)
 		running, err := call(task, "Run", &empty)
 		if running != nil {
@@ -78,9 +84,11 @@ func stopTask() {
 	})
 }
 
-func deleteTask() {
+func deleteTask() { deleteNamedTask(taskName) }
+
+func deleteNamedTask(name string) {
 	_ = withTaskFolder(func(folder *ole.IDispatch) error {
-		_, err := call(folder, "DeleteTask", taskName, int32(0))
+		_, err := call(folder, "DeleteTask", name, int32(0))
 		return err
 	})
 }

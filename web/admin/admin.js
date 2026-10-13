@@ -273,6 +273,7 @@ function renderDash(s) {
   cnote.classList.toggle('hidden', !s.config_notice);
 
   renderSignIns(s.sign_ins || []);
+  renderUpdate(s.update);
   renderDeps(s.deps || []);
   const st = s.stream || {};
   const err = (s.https_error && `HTTPS server: ${s.https_error}`) || st.error || (st.stats && st.stats.error);
@@ -349,6 +350,42 @@ $('#btn-logs-copy').addEventListener('click', async () => {
   } catch {
     logsNote('Copy failed; use Download logs instead.', true);
   }
+});
+
+// Updates from the GitHub releases.
+function renderUpdate(u) {
+  const card = $('#update-card');
+  card.classList.toggle('hidden', !u || !u.supported);
+  if (!u || !u.supported) return;
+  let line;
+  if (u.state === 'downloading') line = `Downloading Windstream ${u.latest}… ${u.progress || 0}%`;
+  else if (u.state === 'installing') line = `Installing Windstream ${u.latest}. Windstream restarts in a moment and this page reconnects by itself.`;
+  else if (u.state === 'checking') line = 'Checking for updates…';
+  else if (u.available) {
+    line = `Windstream ${u.latest} is available (you have ${u.current}).`;
+    if (u.unattended && u.auto) line += ' It installs by itself as soon as nobody is playing.';
+  } else if (u.checked) line = `Windstream ${u.current} is up to date.`;
+  else line = `Windstream ${u.current}. Windstream checks for updates a couple of minutes after it starts.`;
+  $('#update-line').textContent = line;
+  const busy = u.state === 'downloading' || u.state === 'installing';
+  $('#btn-update').classList.toggle('hidden', !u.available || busy);
+  $('#btn-update-check').disabled = busy || u.state === 'checking';
+  $('#update-error').textContent = u.error || '';
+  $('#update-auto-row').classList.toggle('hidden', !u.unattended);
+  $('#update-auto').checked = !!u.auto;
+  $('#update-mac-note').classList.toggle('hidden', u.unattended || !u.available);
+}
+$('#btn-update').addEventListener('click', async () => {
+  try { await api('/api/update/install', {}); } catch (e) { $('#update-error').textContent = e.message; }
+  refresh();
+});
+$('#btn-update-check').addEventListener('click', async () => {
+  try { await api('/api/update/check', {}); } catch (e) { $('#update-error').textContent = e.message; }
+  setTimeout(refresh, 1500);
+});
+$('#update-auto').addEventListener('change', async (ev) => {
+  try { await api('/api/update/auto', { on: ev.target.checked }); } catch (e) { $('#update-error').textContent = e.message; }
+  refresh();
 });
 
 // Who signed in (or tried to): newest first.

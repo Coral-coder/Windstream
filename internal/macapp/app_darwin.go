@@ -214,6 +214,7 @@ func CheckPermissions() {
 // platform is the control.Platform for macOS.
 type platform struct {
 	quit        func()
+	restart     func() // exit so launchd starts the (updated) app again
 	onUninstall func(removeData bool)
 
 	mu     sync.Mutex
@@ -314,6 +315,12 @@ func Agent(run RunFunc) error {
 	var removeData *bool
 	var mu sync.Mutex
 	plat := &platform{quit: cancel, screen: macos.ScreenRecordingAllowed(), access: macos.AccessibilityAllowed()}
+	plat.restart = func() {
+		mu.Lock()
+		exitCode = restartExitCode
+		mu.Unlock()
+		cancel()
+	}
 	plat.onUninstall = func(rd bool) {
 		mu.Lock()
 		removeData = &rd

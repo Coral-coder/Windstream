@@ -69,6 +69,7 @@ type Controller struct {
 	opts    Options
 	log     *slog.Logger
 	cfgPath string
+	upd     updater
 
 	mu  sync.Mutex
 	cfg *config.Config
@@ -131,6 +132,7 @@ func New(opts Options) (*Controller, error) {
 	}
 	c.identity = hex.EncodeToString(tok[:])
 	c.signIns = newSignInLog(opts.DataDir)
+	c.upd.init()
 	def := config.AppDefaults()
 	if opts.Dev {
 		def.Display.Mode = "test"
@@ -365,6 +367,8 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	c.restartHTTPS()
 	c.restartNetwork()
+
+	safego(c.log, "updates", func() { c.runUpdates(ctx) })
 
 	safego(c.log, "dependency setup", func() {
 		if !c.opts.Dev {
