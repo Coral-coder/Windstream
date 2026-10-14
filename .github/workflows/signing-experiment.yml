@@ -1,0 +1,87 @@
+name: signing-experiment
+on:
+  push:
+    branches: [signing-experiment]
+permissions:
+  contents: read
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Make a throwaway self-signed code signing certificate
+        run: |
+          set -x
+          which openssl; openssl version
+          cat > cert.cnf <<'CNF'
+          [req]
+          distinguished_name = dn
+          prompt = no
+          x509_extensions = ext
+          [dn]
+          CN = Windstream Self-Signed
+          [ext]
+          basicConstraints = critical,CA:false
+          keyUsage = critical,digitalSignature
+          extendedKeyUsage = critical,codeSigning
+          subjectKeyIdentifier = hash
+          CNF
+          openssl req -x509 -newkey rsa:3072 -nodes -keyout key.pem -out cert.pem -days 7300 -config cert.cnf
+          openssl pkcs12 -export -inkey key.pem -in cert.pem -out cert.p12 -passout pass:test123 -name "Windstream Self-Signed" -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1
+      - name: Import into a temporary keychain (no trust settings)
+        run: |
+          set -x
+          security create-keychain -p kc build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p kc build.keychain
+          security import cert.p12 -k build.keychain -P test123 -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k kc build.keychain
+          security list-keychains -d user -s build.keychain $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning build.keychain || true
+          security find-identity -p codesigning build.keychain
+      - name: Build two different versions and sign both
+        run: |
+          set -x
+          for v in 1.0.0 2.0.0; do
+            GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$v" -o ws-$v ./cmd/windstream
+            go run ./tools/macbundle -exe ws-$v -version $v -out out-$v
+            HASH=$(security find-identity -p codesigning build.keychain | awk '/Windstream Self-Signed/{print $2; exit}')
+            codesign --force --deep --sign "$HASH" --keychain build.keychain out-$v/Windstream.app
+            codesign --verify --deep --strict --verbose=2 out-$v/Windstream.app
+            codesign -dvv out-$v/Windstream.app 2>&1 | grep -E "Authority|Identifier|Signature|TeamIdentifier"
+            codesign -dr - out-$v/Windstream.app
+          done
+      - name: Does version 2 satisfy version 1's designated requirement (what TCC checks)?
+        run: |
+          set -x
+          DR=$(codesign -dr - out-1.0.0/Windstream.app 2>&1 | sed -n 's/^designated => //p')
+          echo "DR: $DR"
+          codesign -v -R="$DR" out-2.0.0/Windstream.app && echo "SAME IDENTITY: permissions survive updates"
+          # Control: ad-hoc builds do not.
+          cp -R out-1.0.0 adhoc1; cp -R out-2.0.0 adhoc2
+          codesign --force --deep -s - adhoc1/Windstream.app; codesign --force --deep -s - adhoc2/Windstream.app
+          ADR=$(codesign -dr - adhoc1/Windstream.app 2>&1 | sed -n 's/^designated => //p'); echo "adhoc DR: $ADR"
+          codesign -v -R="$ADR" adhoc2/Windstream.app && echo "adhoc same?!" || echo "adhoc: different identity (as expected)"
+          spctl -a -vv out-2.0.0/Windstream.app || true
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Sign with a throwaway PFX via signtool
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Windstream Test" -CertStoreLocation Cert:\CurrentUser\My
+          $pw = ConvertTo-SecureString -String "test123" -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath test.pfx -Password $pw | Out-Null
+          $env:GOOS="windows"; go build -ldflags "-H=windowsgui" -o Windstream.exe ./cmd/windstream
+          $signtool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe | Where-Object { $_.FullName -match "x64" } | Sort-Object FullName -Descending | Select-Object -First 1
+          echo $signtool.FullName
+          & $signtool.FullName sign /f test.pfx /p test123 /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d Windstream Windstream.exe
+          & $signtool.FullName verify /pa /v Windstream.exe; echo "verify exit $LASTEXITCODE (untrusted root expected)"
+          Get-AuthenticodeSignature Windstream.exe | Format-List
