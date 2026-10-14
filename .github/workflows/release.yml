@@ -26,7 +26,7 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
-      - name: Build Windstream.app (Apple silicon + Intel), ad-hoc signed
+      - name: Build Windstream.app (Apple silicon + Intel)
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
@@ -40,10 +40,39 @@ jobs:
           go run ./tools/macbundle -exe windstream -version "$VERSION" -out pkg
           lipo -create -output "pkg/Windstream Reset Password" reset-arm64 reset-amd64
           chmod +x "pkg/Windstream Reset Password"
-          codesign --force --deep --sign - pkg/Windstream.app
-          codesign --force --sign - "pkg/Windstream Reset Password"
-          codesign --verify --deep --strict pkg/Windstream.app
+      - name: Signing certificate
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: .github/scripts/mac-signing-identity.sh
+      - name: Sign
+        run: |
+          # Developer ID signatures need the hardened runtime and a secure
+          # timestamp for notarization.
+          set -- --force
+          [ "$SIGN_KIND" = developer-id ] && set -- "$@" --options runtime --timestamp
+          [ -n "${SIGN_KEYCHAIN:-}" ] && set -- "$@" --keychain "$SIGN_KEYCHAIN"
+          codesign "$@" --deep --sign "$SIGN_ID" pkg/Windstream.app
+          codesign "$@" --sign "$SIGN_ID" "pkg/Windstream Reset Password"
+          codesign --verify --deep --strict --verbose=2 pkg/Windstream.app
+          codesign --display --requirements - pkg/Windstream.app
           pkg/Windstream.app/Contents/MacOS/Windstream version
+      - name: Notarize (Developer ID only)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          if [ "$SIGN_KIND" != developer-id ] || [ -z "$APPLE_ID" ]; then
+            echo "Not notarizing: needs a Developer ID certificate and the APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD secrets."
+            exit 0
+          fi
+          (cd pkg && ditto -c -k --keepParent . ../notarize.zip)
+          xcrun notarytool submit notarize.zip --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple pkg/Windstream.app
+      - name: Zip
+        run: |
           mkdir -p dist
           (cd pkg && ditto -c -k --sequesterRsrc . ../dist/Windstream-macOS.zip)
           unzip -l dist/Windstream-macOS.zip

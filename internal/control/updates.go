@@ -17,10 +17,12 @@ type Updater interface {
 	// UpdateAsset names the release download for this computer.
 	UpdateAsset() string
 	// InstallUpdate installs the downloaded file and restarts Windstream
-	// with it (this process ends shortly after it returns).
-	InstallUpdate(file, version string) error
-	// UnattendedUpdates reports whether an update may install with nobody
-	// at the computer.
+	// with it (this process ends shortly after it returns). unattended is
+	// true when nobody asked for it: the platform must then refuse an
+	// update that would need someone at the computer.
+	InstallUpdate(file, version string, unattended bool) error
+	// UnattendedUpdates reports whether updates may install with nobody at
+	// the computer.
 	UnattendedUpdates() bool
 }
 
@@ -127,7 +129,7 @@ func (c *Controller) runUpdates(ctx context.Context) {
 			next = time.Now().Add(updateEvery)
 		}
 		if c.autoInstallDue(p) {
-			if err := c.installUpdate(ctx, p); err != nil {
+			if err := c.installUpdate(ctx, p, true); err != nil {
 				c.upd.mu.Lock()
 				c.upd.skip = c.upd.rel.Version // not again until the next release
 				c.upd.mu.Unlock()
@@ -177,7 +179,7 @@ var errUpdateBusy = errors.New("an update is already being installed")
 
 // installUpdate downloads the available release, checks it and hands it to
 // the platform installer.
-func (c *Controller) installUpdate(ctx context.Context, p Updater) error {
+func (c *Controller) installUpdate(ctx context.Context, p Updater, unattended bool) error {
 	c.upd.mu.Lock()
 	if c.upd.busy {
 		c.upd.mu.Unlock()
@@ -213,7 +215,7 @@ func (c *Controller) installUpdate(ctx context.Context, p Updater) error {
 	}
 	c.upd.set(func(s *updateStatus) { s.State = "installing" })
 	c.log.Info("installing update; Windstream restarts in a moment", "version", rel.Version)
-	if err := p.InstallUpdate(file, rel.Version); err != nil {
+	if err := p.InstallUpdate(file, rel.Version, unattended); err != nil {
 		return fail(err)
 	}
 	return nil

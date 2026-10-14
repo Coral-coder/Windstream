@@ -67,3 +67,23 @@ jobs:
           codesign --verify --deep --strict dist/Windstream.app
           dist/Windstream.app/Contents/MacOS/Windstream version
           dist/Windstream.app/Contents/MacOS/Windstream --tcc-check
+      - name: Certificate signing keeps the app's identity across versions
+        run: |
+          # The release signs with the MACOS_CERTIFICATE_P12 secret; here a
+          # throwaway certificate made by the same script (with OpenSSL 3,
+          # like the real one) stands in for it. It never leaves this runner.
+          PATH="$(brew --prefix openssl@3)/bin:$PATH" scripts/make-mac-signing-cert.sh "$RUNNER_TEMP/cert"
+          export MACOS_CERTIFICATE_P12=$(cat "$RUNNER_TEMP/cert/MACOS_CERTIFICATE_P12.txt")
+          export MACOS_CERTIFICATE_PASSWORD=$(cat "$RUNNER_TEMP/cert/MACOS_CERTIFICATE_PASSWORD.txt")
+          GITHUB_ENV=$RUNNER_TEMP/sign.env .github/scripts/mac-signing-identity.sh
+          . "$RUNNER_TEMP/sign.env"
+          for v in 1.0.0 2.0.0; do
+            GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=$v" -o ws-$v ./cmd/windstream
+            go run ./tools/macbundle -exe ws-$v -version $v -out signed-$v
+            codesign --force --deep --keychain "$SIGN_KEYCHAIN" --sign "$SIGN_ID" signed-$v/Windstream.app
+          done
+          DR=$(codesign --display --requirements - signed-1.0.0/Windstream.app 2>&1 | sed -n 's/^designated => //p')
+          echo "designated requirement: $DR"
+          codesign --verify -R="$DR" signed-2.0.0/Windstream.app
+          WINDSTREAM_TEST_SIGNED_APP=$PWD/signed-2.0.0/Windstream.app WINDSTREAM_TEST_ADHOC_APP=$PWD/dist/Windstream.app \
+            go test -run TestDesignatedRequirement -v ./internal/macapp

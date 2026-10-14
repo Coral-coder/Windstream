@@ -30,7 +30,7 @@ func (fakeNoPlatform) Quit()                   {}
 func (fakeNoPlatform) PanelReady(string)       {}
 func (f *fakeUpdater) UpdateAsset() string     { return "Windstream.exe" }
 func (f *fakeUpdater) UnattendedUpdates() bool { return f.unattended }
-func (f *fakeUpdater) InstallUpdate(file, version string) error {
+func (f *fakeUpdater) InstallUpdate(file, version string, unattended bool) error {
 	b, err := os.ReadFile(file)
 	f.installed = version + ":" + string(b)
 	return err
@@ -75,7 +75,7 @@ func TestAutomaticUpdate(t *testing.T) {
 	if !c.autoInstallDue(p) {
 		t.Fatal("update not due with nobody streaming")
 	}
-	if err := c.installUpdate(ctx, p); err != nil {
+	if err := c.installUpdate(ctx, p, true); err != nil {
 		t.Fatal(err)
 	}
 	if p.installed != "1.0.16:new build" {

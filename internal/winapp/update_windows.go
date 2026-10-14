@@ -61,7 +61,7 @@ func (p *platform) UnattendedUpdates() bool { return true }
 
 // InstallUpdate hands the downloaded exe to Task Scheduler, which runs it
 // with --update: it stops this app, installs itself and starts again.
-func (p *platform) InstallUpdate(file, version string) error {
+func (p *platform) InstallUpdate(file, version string, unattended bool) error {
 	dir := filepath.Join(DataDir, "update")
 	if !strings.EqualFold(filepath.Dir(filepath.Clean(file)), dir) {
 		return errors.New("update file is not in the update folder")

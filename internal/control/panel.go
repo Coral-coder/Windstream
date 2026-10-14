@@ -665,7 +665,7 @@ func (p *panel) handleUpdateInstall(w http.ResponseWriter, r *http.Request) {
 		jsonErr(w, http.StatusBadRequest, "Windstream is up to date")
 		return
 	}
-	safego(p.c.log, "install update", func() { _ = p.c.installUpdate(p.c.runCtx, up) })
+	safego(p.c.log, "install update", func() { _ = p.c.installUpdate(p.c.runCtx, up, false) })
 	jsonOK(w, map[string]bool{"ok": true})
 }
 
