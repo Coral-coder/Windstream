@@ -134,7 +134,7 @@ func main() {
 	for k, v := range map[string]string{
 		version.ProductName: "Windstream", version.FileDescription: "Windstream game streaming",
 		version.CompanyName: "Windstream", version.OriginalFilename: "Windstream.exe",
-		version.LegalCopyright: "Windstream contributors",
+		version.LegalCopyright: "Copyright (c) 2026 Coral-coder. MIT License.",
 	} {
 		_ = vi.Set(0, k, v)
 	}

@@ -74,6 +74,7 @@ func InfoPlist(version string) string {
 	<key>NSHighResolutionCapable</key><true/>
 	<key>NSScreenCaptureUsageDescription</key><string>Windstream streams this Mac's screen to your other devices.</string>
 	<key>NSAppleEventsUsageDescription</key><string>Windstream shows messages while installing.</string>
+	<key>NSHumanReadableCopyright</key><string>Copyright © 2026 Coral-coder. MIT License.</string>
 </dict>
 </plist>
 `, BundleID, html.EscapeString(version), html.EscapeString(version))

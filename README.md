@@ -142,3 +142,13 @@ make resources     # regenerate the exe icon/manifest and tray icon
 | `internal/display` | Virtual display control, primary-screen swap, DXGI lookup |
 | `internal/input` | SendInput (scan codes), native ViGEmBus client |
 | `web` | Streaming page and dashboard (embedded in the exe) |
+
+## License
+
+Windstream is released under the [MIT License](LICENSE).
+
+It downloads some third-party programs at runtime instead of bundling them;
+each comes under its own license: [FFmpeg](https://ffmpeg.org/legal.html)
+(GPL builds from gyan.dev on Windows and ffmpeg-static on macOS), the
+[Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver)
+(MIT) and [ViGEmBus](https://github.com/nefarius/ViGEmBus) (BSD-3-Clause).
