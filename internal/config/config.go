@@ -177,11 +177,16 @@ type Video struct {
 	// Codec is auto, av1, h265 or h264. "auto" streams the most efficient
 	// codec that both this PC's encoder and the viewer's browser handle in
 	// hardware (AV1, then HEVC, then H.264).
-	Codec       string  `toml:"codec"`
-	FPS         int     `toml:"fps"`
-	BitrateKbps int     `toml:"bitrate_kbps"`
-	GOPSeconds  float64 `toml:"gop_seconds"`
-	Preset      string  `toml:"preset"`
+	Codec       string `toml:"codec"`
+	FPS         int    `toml:"fps"`
+	BitrateKbps int    `toml:"bitrate_kbps"`
+	// GOPSeconds forces a keyframe this often. 0 (the default) makes one
+	// only when a viewer needs it (joining, or a loss retransmission could
+	// not repair): with the low-latency one-frame rate-control buffer, a
+	// keyframe cannot get the bits it needs, so periodic ones show as a
+	// blurry "pulse", most visibly at 4K.
+	GOPSeconds float64 `toml:"gop_seconds"`
+	Preset     string  `toml:"preset"`
 	// Profile is the H.264 profile: high (best quality per bit), main, or
 	// baseline (only needed for unusual decoders).
 	Profile string `toml:"profile"`
@@ -254,7 +259,7 @@ func Default() Config {
 			VirtualDevice: "Virtual Display", MakePrimary: true, StartupTimeout: Duration{15 * time.Second},
 		},
 		Video: Video{
-			Encoder: "auto", Codec: "auto", FPS: 60, BitrateKbps: 15000, GOPSeconds: 2,
+			Encoder: "auto", Codec: "auto", FPS: 60, BitrateKbps: 15000, GOPSeconds: 0,
 			FFmpegBinary: "ffmpeg", ShowCursor: true, Profile: "high",
 		},
 		Audio:   Audio{Enabled: true, Backend: "wasapi", BitrateKbps: 128},
@@ -335,6 +340,11 @@ func decode(data []byte, base Config) (Config, error) {
 	}
 	for _, k := range md.Undecoded() {
 		cfg.UnknownKeys = append(cfg.UnknownKeys, k.String())
+	}
+	// Settings files saved before 1.0.18 hold the old default of 2 s,
+	// which caused the keyframe pulse; nothing in the app set it otherwise.
+	if cfg.Video.GOPSeconds == 2 {
+		cfg.Video.GOPSeconds = 0
 	}
 	return cfg, nil
 }
@@ -540,8 +550,8 @@ func (c *Config) Validate() error {
 	if c.Video.BitrateKbps < 500 {
 		add("video.bitrate_kbps must be >= 500")
 	}
-	if c.Video.GOPSeconds <= 0 || c.Video.GOPSeconds > 30 {
-		add("video.gop_seconds must be in (0, 30]")
+	if c.Video.GOPSeconds < 0 || c.Video.GOPSeconds > 30 {
+		add("video.gop_seconds must be 0 (on demand) to 30")
 	}
 	switch c.Video.Profile {
 	case "high", "main", "baseline":
@@ -590,8 +600,12 @@ func (c *Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// GOPFrames returns the keyframe interval in frames.
+// GOPFrames returns the keyframe interval in frames, or 0 for keyframes
+// only on request.
 func (v Video) GOPFrames() int {
+	if v.GOPSeconds == 0 {
+		return 0
+	}
 	g := int(float64(v.FPS)*v.GOPSeconds + 0.5)
 	if g < 1 {
 		g = 1

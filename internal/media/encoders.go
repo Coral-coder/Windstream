@@ -41,7 +41,7 @@ type VideoConfig struct {
 	Height      int
 	FPS         int
 	BitrateKbps int
-	GOPFrames   int
+	GOPFrames   int    // keyframe interval; 0 = only when a viewer asks (see OnDemandGOP)
 	Encoder     string // auto|nvenc|amf|qsv|x264 (x264 = software)
 	Preset      string
 	Profile     string // H.264 profile: baseline|main|high
@@ -137,6 +137,24 @@ func Candidates(ctx context.Context, cfg VideoConfig, codec string) ([]string, m
 	return ok, failed
 }
 
+// gopFrames is the keyframe interval passed to the encoder. On demand (0)
+// becomes ten minutes: the hub restarts the encoder when a viewer needs a
+// keyframe, so a scheduled one is only a last resort. AMF and SVT-AV1 get
+// shorter limits they are known to accept.
+func gopFrames(cfg VideoConfig, codec, vendor string) int {
+	if cfg.GOPFrames > 0 {
+		return cfg.GOPFrames
+	}
+	g := cfg.FPS * 600
+	switch {
+	case vendor == "amf":
+		g = min(g, 1000)
+	case codec == CodecAV1 && !IsHardware(vendor):
+		g = min(g, 600)
+	}
+	return max(g, 1)
+}
+
 // BuildVideoArgs assembles the ffmpeg command line. Output is RTP to
 // rtpURL; the RTP marker bit tells us exactly when a frame is complete, so no
 // frame is held back waiting for the next one.
@@ -150,7 +168,7 @@ func BuildVideoArgs(cfg VideoConfig, codec, vendor string, src Source, rtpURL st
 		vbvKbps = 500
 	}
 	vbv := strconv.Itoa(vbvKbps) + "k"
-	gop := strconv.Itoa(cfg.GOPFrames)
+	gop := strconv.Itoa(gopFrames(cfg, codec, vendor))
 	fps := strconv.Itoa(cfg.FPS)
 	cursor := "0"
 	if cfg.ShowCursor {
@@ -267,7 +285,8 @@ func BuildVideoArgs(cfg VideoConfig, codec, vendor string, src Source, rtpURL st
 			if preset == "" {
 				preset = "superfast"
 			}
-			args = append(args, "-preset", preset, "-tune", "zerolatency",
+			// No scene-cut I-frames either: they pulse like keyframes.
+			args = append(args, "-preset", preset, "-tune", "zerolatency", "-sc_threshold", "0",
 				"-x264-params", "repeat-headers=1:nal-hrd=cbr:force-cfr=1:sliced-threads=1")
 		}
 	}

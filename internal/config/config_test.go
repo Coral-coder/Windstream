@@ -25,8 +25,8 @@ func TestParseMinimal(t *testing.T) {
 	if cfg.Server.Listen != ":8443" {
 		t.Errorf("default listen not applied: %q", cfg.Server.Listen)
 	}
-	if cfg.Video.GOPFrames() != 120 {
-		t.Errorf("gop frames = %d, want 120", cfg.Video.GOPFrames())
+	if cfg.Video.GOPFrames() != 0 {
+		t.Errorf("gop frames = %d, want 0 (keyframes on demand)", cfg.Video.GOPFrames())
 	}
 	if !cfg.Input.Gamepads || !cfg.Audio.Enabled {
 		t.Errorf("boolean defaults lost")
@@ -188,5 +188,19 @@ totp_secret = "JBSWY3DPEHPK3PXP"
 	}
 	if !strings.Contains(what, "Removed 1") {
 		t.Fatalf("what = %q", what)
+	}
+}
+
+func TestOldKeyframeIntervalIsMigrated(t *testing.T) {
+	// Files saved before keyframes on demand hold the old 2 s default,
+	// which pulsed; an explicit other value is kept.
+	for in, want := range map[string]int{"2": 0, "1": 60, "0": 0} {
+		cfg, err := Parse([]byte(minimal + "\n[video]\ngop_seconds = " + in + "\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.Video.GOPFrames(); got != want {
+			t.Errorf("gop_seconds = %s: %d frames, want %d", in, got, want)
+		}
 	}
 }

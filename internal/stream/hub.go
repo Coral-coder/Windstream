@@ -68,7 +68,10 @@ type Stats struct {
 	Running    bool   `json:"running"`
 	Frames     uint64 `json:"frames"`
 	Keyframes  uint64 `json:"keyframes"`
-	Bytes      uint64 `json:"bytes"`
+	// KeyframeRequests counts keyframes made because a viewer asked
+	// (joining, or after a loss retransmission could not repair).
+	KeyframeRequests uint64 `json:"keyframe_requests"`
+	Bytes            uint64 `json:"bytes"`
 }
 
 // Hub multiplexes one capture pipeline to every connected client.
@@ -106,6 +109,18 @@ type Hub struct {
 	avail   map[string][]string // codec -> working vendors, in preference order
 
 	frames, keyframes, bytes atomic.Uint64
+
+	// Keyframes on request: the encoder makes keyframes only when it
+	// starts, so a viewer's request restarts it (see requestKeyframe).
+	kfRestart  atomic.Bool // the current run is being restarted for a keyframe
+	kfForced   atomic.Uint64
+	runStarted atomic.Int64 // UnixNano of the current encoder start
+	lastKey    atomic.Int64 // UnixNano of the newest keyframe sent
+	lastForced atomic.Int64
+
+	// lastActivity is when a viewer last used the mouse, keyboard or a
+	// controller (or connected), UnixNano.
+	lastActivity atomic.Int64
 	// pktMu guards per-packet state: a stopped pipeline's goroutine can
 	// deliver its last packets while a restarted one begins.
 	pktMu      sync.Mutex
@@ -245,6 +260,7 @@ func (h *Hub) Stats() Stats {
 		AudioError: h.audioErr,
 		Clients:    len(h.clients), Encoder: h.encoder, Codec: h.codec, Running: h.pipeCancel != nil,
 		Frames: h.frames.Load(), Keyframes: h.keyframes.Load(), Bytes: h.bytes.Load(),
+		KeyframeRequests: h.kfForced.Load(),
 	}
 }
 
@@ -265,6 +281,7 @@ func (h *Hub) addClient(c *Client) error {
 		return fmt.Errorf("stream: client limit (%d) reached", h.cfg.MaxClients)
 	}
 	h.clients[c] = struct{}{}
+	h.lastActivity.Store(time.Now().UnixNano()) // a new viewer is not idle
 	if h.stopTimer != nil {
 		h.stopTimer.Stop()
 		h.stopTimer = nil
@@ -359,6 +376,7 @@ func (h *Hub) keepRunning(ctx context.Context, wg *sync.WaitGroup, which string,
 
 func (h *Hub) runVideo(ctx context.Context) {
 	backoff := time.Second
+	h.kfRestart.Store(false) // a request left over from the previous session
 	if h.cfg.Acquire != nil {
 		for {
 			err := h.cfg.Acquire(ctx)
@@ -379,7 +397,7 @@ func (h *Hub) runVideo(ctx context.Context) {
 		backoff = time.Second
 	}
 	next, lastCodec, asleep := 0, "", 0
-	blocked := false
+	blocked, forKeyframe := false, false
 	for ctx.Err() == nil {
 		h.mu.Lock()
 		codec := h.codec
@@ -426,12 +444,18 @@ func (h *Hub) runVideo(ctx context.Context) {
 		h.lastErr = ""
 		h.runCancel = cancel
 		h.mu.Unlock()
-		if h.cfg.Wake != nil {
-			h.cfg.Wake() // a viewer is waiting: the screen must be on
+		if forKeyframe {
+			h.log.Debug("restarting the encoder for a keyframe a viewer asked for")
+		} else {
+			if h.cfg.Wake != nil {
+				h.cfg.Wake() // a viewer is waiting: the screen must be on
+			}
+			h.log.Info("starting video pipeline", "codec", codec, "encoder", wsmedia.EncoderName(codec, vendor),
+				"test_source", src.Test, "adapter", src.Adapter, "output", src.Output, "fps", h.cfg.Video.FPS,
+				"bitrate_kbps", h.cfg.Video.BitrateKbps)
 		}
-		h.log.Info("starting video pipeline", "codec", codec, "encoder", wsmedia.EncoderName(codec, vendor),
-			"test_source", src.Test, "adapter", src.Adapter, "output", src.Output, "fps", h.cfg.Video.FPS,
-			"bitrate_kbps", h.cfg.Video.BitrateKbps)
+		forKeyframe = false
+		h.runStarted.Store(time.Now().UnixNano())
 		start := time.Now()
 		before := h.frames.Load()
 		track := h.tracks[codec]
@@ -461,7 +485,12 @@ func (h *Hub) runVideo(ctx context.Context) {
 			return
 		}
 		if switched {
+			h.kfRestart.Store(false) // the new encoder starts with one anyway
 			h.log.Info("video codec changed; restarting encoder", "from", codec)
+			continue
+		}
+		if h.kfRestart.Swap(false) {
+			forKeyframe = true
 			continue
 		}
 		produced := h.frames.Load() > before
@@ -635,7 +664,7 @@ func (h *Hub) attach(c *Client, prefs []string) error {
 		return fmt.Errorf("add video track: %w", err)
 	}
 	c.videoSender = sender
-	go drainRTCP(c.log, sender)
+	go drainRTCP(c.log, sender, func() { h.requestKeyframe(c) })
 	h.lastPrefs = prefs
 	c.log.Info("video codec chosen", "codec", codec, "browser_supports", prefs)
 	if codec != h.codec {
@@ -726,6 +755,62 @@ func (h *Hub) codecFailed(codec string) bool {
 	return true
 }
 
+// InputIdle reports how long no viewer has used the mouse, keyboard or a
+// controller (since the last input, or since the newest viewer connected).
+func (h *Hub) InputIdle() time.Duration {
+	return time.Since(time.Unix(0, h.lastActivity.Load()))
+}
+
+func (h *Hub) noteActivity() { h.lastActivity.Store(time.Now().UnixNano()) }
+
+// AnnounceUpdate tells every viewer that Windstream is about to restart
+// into a new version; their pages reconnect by themselves.
+func (h *Hub) AnnounceUpdate(msg string) {
+	h.mu.Lock()
+	clients := make([]*Client, 0, len(h.clients))
+	for c := range h.clients {
+		clients = append(clients, c)
+	}
+	h.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, c := range clients {
+		wg.Add(1)
+		safe.Go(c.log, "announce update", func() {
+			defer wg.Done()
+			_ = c.send(SignalMessage{Type: "updating", Message: msg})
+		})
+	}
+	wg.Wait()
+}
+
+// Keyframe requests are honoured at most this often; a fresh encoder and a
+// keyframe sent moments ago already answer them.
+const (
+	keyframeMinInterval = time.Second
+	keyframeGrace       = 2 * time.Second // after an encoder start
+)
+
+// requestKeyframe answers a viewer's PLI/FIR. Encoders make keyframes
+// only when they start (periodic ones pulse: see config.Video.GOPSeconds),
+// so the encoder is restarted, which takes a fraction of a second.
+func (h *Hub) requestKeyframe(c *Client) {
+	now := time.Now().UnixNano()
+	if now-h.runStarted.Load() < int64(keyframeGrace) || now-h.lastKey.Load() < int64(keyframeMinInterval) ||
+		now-h.lastForced.Load() < int64(keyframeMinInterval) {
+		return
+	}
+	h.mu.Lock()
+	cancel := h.runCancel
+	h.mu.Unlock()
+	if cancel == nil || h.kfRestart.Swap(true) {
+		return // not running, or already restarting
+	}
+	h.lastForced.Store(now)
+	h.kfForced.Add(1)
+	c.log.Debug("viewer asked for a keyframe")
+	cancel()
+}
+
 // blockedNotice is shown to viewers while Windows shows a protected screen.
 const blockedNotice = "The PC is showing a Windows security prompt (usually a game or launcher asking for " +
 	"administrator permission) or the lock screen. Windows only lets someone at the PC answer it; " +
@@ -796,6 +881,7 @@ func (h *Hub) onVideoPacket(track *webrtc.TrackLocalStaticRTP, p wsmedia.VideoPa
 	defer h.pktMu.Unlock()
 	if p.Keyframe && !h.frameIsKey {
 		h.frameIsKey = true
+		h.lastKey.Store(time.Now().UnixNano())
 		if h.keyframes.Add(1) == 1 {
 			h.log.Info("first keyframe produced")
 		}

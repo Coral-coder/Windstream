@@ -33,6 +33,9 @@ const UpdateFailedNote = "failed.txt"
 const (
 	updateFirstCheck = 2 * time.Minute
 	updateEvery      = 6 * time.Hour
+	// updateWhenIdle: with viewers connected, an update waits until nobody
+	// has used the mouse, keyboard or a controller for this long.
+	updateWhenIdle = 5 * time.Minute
 )
 
 // updateStatus is the dashboard's view of updates.
@@ -172,7 +175,37 @@ func (c *Controller) autoInstallDue(p Updater) bool {
 	c.upd.mu.Lock()
 	due := c.upd.st.Available && !c.upd.busy && c.upd.skip != c.upd.rel.Version
 	c.upd.mu.Unlock()
-	return due && c.stackStatus().Stats.Clients == 0 // never in the middle of a game
+	return due && c.viewersIdle() // never in the middle of a game
+}
+
+// viewersIdle reports whether nobody is streaming, or nobody streaming has
+// touched the mouse, keyboard or a controller for updateWhenIdle.
+func (c *Controller) viewersIdle() bool {
+	c.stackMu.Lock()
+	hub := c.hub
+	c.stackMu.Unlock()
+	return hub == nil || hub.ClientCount() == 0 || hub.InputIdle() >= updateWhenIdle
+}
+
+// announceCancelled takes the update warning back.
+func (c *Controller) announceCancelled() {
+	c.stackMu.Lock()
+	hub := c.hub
+	c.stackMu.Unlock()
+	if hub != nil {
+		hub.AnnounceUpdate("")
+	}
+}
+
+// announceUpdate warns connected viewers that the stream is about to go
+// away for a moment; their pages reconnect by themselves.
+func (c *Controller) announceUpdate(version string) {
+	c.stackMu.Lock()
+	hub := c.hub
+	c.stackMu.Unlock()
+	if hub != nil && hub.ClientCount() > 0 {
+		hub.AnnounceUpdate("Windstream is updating to " + version + ". The stream comes back by itself in about half a minute.")
+	}
 }
 
 var errUpdateBusy = errors.New("an update is already being installed")
@@ -214,8 +247,10 @@ func (c *Controller) installUpdate(ctx context.Context, p Updater, unattended bo
 		return fail(err)
 	}
 	c.upd.set(func(s *updateStatus) { s.State = "installing" })
+	c.announceUpdate(rel.Version)
 	c.log.Info("installing update; Windstream restarts in a moment", "version", rel.Version)
 	if err := p.InstallUpdate(file, rel.Version, unattended); err != nil {
+		c.announceCancelled()
 		return fail(err)
 	}
 	return nil

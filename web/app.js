@@ -156,6 +156,14 @@ function connect() {
       if (ev.reason !== 'refused') { showLogin(); return; }
     }
     if (!state.active) return;
+    if (state.updating && Date.now() - state.updating < 3 * 60 * 1000) {
+      // The server is restarting into a new version: keep trying every
+      // couple of seconds so the stream resumes as soon as it is back.
+      setStatus('Windstream is updating. The stream comes back by itself in a moment…');
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = setTimeout(connect, 2000);
+      return;
+    }
     setStatus(`Disconnected. Reconnecting in ${Math.round(state.reconnectDelay / 1000)}s…`);
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = setTimeout(connect, state.reconnectDelay);
@@ -197,6 +205,10 @@ async function handleSignal(msg) {
     case 'error':
       state.fatalError = msg.message;
       setStatus(msg.message);
+      break;
+    case 'updating': // Windstream restarts into a new version ('' = it did not)
+      state.updating = msg.message ? Date.now() : 0;
+      setStatus(msg.message || state.notice || '');
       break;
     case 'notice': // why the picture is frozen right now ('' = it is back)
       state.notice = msg.message || '';
@@ -241,7 +253,7 @@ function createPeer(iceServers) {
   };
   pc.onconnectionstatechange = () => {
     const s = pc.connectionState;
-    if (s === 'connected') { setStatus(state.notice || ''); state.reconnectDelay = 1000; }
+    if (s === 'connected') { state.updating = 0; setStatus(state.notice || ''); state.reconnectDelay = 1000; }
     else if (s === 'connecting') setStatus('Negotiating media…');
     else if (s === 'failed') { setStatus('Connection failed. Retrying…'); if (state.ws) state.ws.close(); }
     else if (s === 'disconnected') setStatus('Connection interrupted…');

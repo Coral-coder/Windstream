@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/coral-coder/windstream/internal/config"
@@ -74,6 +75,10 @@ type e2eOptions struct {
 	ffmpeg func(t *testing.T, real string) string
 	// notices receives every "notice" message sent to the viewer.
 	notices chan string
+	// onDemandKeyframes leaves out periodic keyframes (the app default).
+	onDemandKeyframes bool
+	// check runs once video flows; ssrc is the video stream's.
+	check func(t *testing.T, browser *webrtc.PeerConnection, hub *Hub, ssrc uint32)
 }
 
 func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder string, opt e2eOptions) {
@@ -85,9 +90,13 @@ func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder str
 	defer cancel()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	gop := 30
+	if opt.onDemandKeyframes {
+		gop = 0
+	}
 	hub, err := NewHub(ctx, Config{
 		Video: wsmedia.VideoConfig{FFmpeg: ff, Width: 640, Height: 360, FPS: 30,
-			BitrateKbps: 1500, GOPFrames: 30, Encoder: "x264"},
+			BitrateKbps: 1500, GOPFrames: gop, Encoder: "x264"},
 		Source:       func() (wsmedia.Source, error) { return wsmedia.Source{Test: true}, nil },
 		AudioEnabled: false,
 		WebRTC:       config.WebRTC{UDPPort: 0, IncludeLoopback: true},
@@ -124,8 +133,10 @@ func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder str
 	}
 	defer browser.Close()
 	var packets, delayed atomic.Int32
+	var videoSSRC atomic.Uint32
 	gotVideo := make(chan struct{}, 1)
 	browser.OnTrack(func(tr *webrtc.TrackRemote, rcv *webrtc.RTPReceiver) {
+		videoSSRC.Store(uint32(tr.SSRC()))
 		if tr.Codec().MimeType != wantMime {
 			t.Errorf("codec %s, want %s", tr.Codec().MimeType, wantMime)
 		}
@@ -257,6 +268,9 @@ func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder str
 	case <-ctx.Done():
 		t.Fatalf("no video RTP received (state=%s, packets=%d)", browser.ConnectionState(), packets.Load())
 	}
+	if opt.check != nil {
+		opt.check(t, browser, hub, videoSSRC.Load())
+	}
 	if opt.hold > 0 {
 		time.Sleep(opt.hold)
 		t.Logf("dropped %d packets; %d delivered in %s", dropped.Load(), packets.Load(), opt.hold)
@@ -360,4 +374,39 @@ func TestHubWaitsOutAdministratorPrompt(t *testing.T) {
 	if !slices.Contains(got, blockedNotice) {
 		t.Errorf("notices %q: viewer was not told about the prompt", got)
 	}
+}
+
+func TestHubKeyframesOnRequest(t *testing.T) {
+	// No periodic keyframes (they pulse at 4K); a viewer's PLI gets one
+	// within moments by restarting the encoder.
+	check := func(t *testing.T, browser *webrtc.PeerConnection, hub *Hub, ssrc uint32) {
+		time.Sleep(keyframeGrace + 500*time.Millisecond)
+		before := hub.Stats().Keyframes
+		time.Sleep(3 * time.Second) // 90 frames: three old-style GOPs
+		if got := hub.Stats().Keyframes; got != before {
+			t.Errorf("%d keyframes without being asked", got-before)
+		}
+		if err := browser.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for hub.Stats().Keyframes == before {
+			if time.Now().After(deadline) {
+				t.Fatalf("no keyframe after a PLI (stats %+v)", hub.Stats())
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		if hub.Stats().KeyframeRequests != 1 {
+			t.Errorf("keyframe requests = %d", hub.Stats().KeyframeRequests)
+		}
+		// A burst of PLIs (browsers repeat them) restarts the encoder once.
+		for i := 0; i < 5; i++ {
+			_ = browser.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}})
+		}
+		time.Sleep(500 * time.Millisecond)
+		if n := hub.Stats().KeyframeRequests; n != 1 {
+			t.Errorf("a burst of PLIs restarted the encoder %d more times", n-1)
+		}
+	}
+	runHubEndToEndWith(t, []string{"h264"}, webrtc.MimeTypeH264, "libx264", e2eOptions{onDemandKeyframes: true, check: check})
 }

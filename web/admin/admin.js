@@ -382,7 +382,7 @@ function renderUpdate(u) {
   else if (u.state === 'checking') line = 'Checking for updates…';
   else if (u.available) {
     line = `Windstream ${u.latest} is available (you have ${u.current}).`;
-    if (u.unattended && u.auto) line += ' It installs by itself as soon as nobody is playing.';
+    if (u.unattended && u.auto) line += ' It installs by itself when nobody is connected, or nobody has used the mouse, keyboard or a controller for 5 minutes; viewers reconnect by themselves.';
   } else if (u.checked) line = `Windstream ${u.current} is up to date.`;
   else line = `Windstream ${u.current}. Windstream checks for updates a couple of minutes after it starts.`;
   $('#update-line').textContent = line;

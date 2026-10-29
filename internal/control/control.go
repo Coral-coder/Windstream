@@ -177,6 +177,10 @@ func New(opts Options) (*Controller, error) {
 	c.auth = auth.NewAuthenticator(nil, true)
 	c.auth.SetUsers(server.UsersFromConfig(cfg), cfg.Auth.RequireTOTP)
 	c.sessions = auth.NewSessionStore(cfg.Auth.SessionIdleTimeout.Duration, cfg.Auth.SessionMaxAge.Duration)
+	// Saved, so viewers stay signed in when Windstream restarts (updates).
+	if err := c.sessions.Persist(filepath.Join(opts.DataDir, "sessions.json")); err != nil {
+		opts.Log.Warn("saved sign-ins could not be read; viewers sign in again", "error", err)
+	}
 	c.limiter = auth.NewLimiter(cfg.Auth.LoginRateLimit, cfg.Auth.LoginRateWindow.Duration)
 	c.deps = deps.NewManager(opts.DataDir, opts.Log)
 	tlsMgr, err := server.NewAutoTLS(filepath.Join(opts.DataDir, "tls"), cfg.Network.ACMEEmail, opts.Log)
@@ -387,6 +391,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		case <-watch.C:
 			c.reloadAccounts()
 		case <-ctx.Done():
+			c.sessions.Flush()
 			c.stopStack()
 			c.httpsMu.Lock()
 			if c.httpsDone != nil {

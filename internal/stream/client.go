@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"golang.org/x/time/rate"
 
@@ -77,6 +78,8 @@ type Client struct {
 	done       chan struct{}
 
 	// Failed input is logged at most every 10 seconds.
+	padMu         sync.Mutex
+	padLast       map[uint8]protocol.GamepadState // to tell real controller use from heartbeats
 	injMu         sync.Mutex
 	injLast       time.Time
 	injSuppressed int
@@ -197,7 +200,7 @@ func (c *Client) setupPeer() error {
 		if err != nil {
 			return fmt.Errorf("add audio track: %w", err)
 		}
-		go drainRTCP(c.log, as)
+		go drainRTCP(c.log, as, nil)
 	}
 
 	ordered, unordered := true, false
@@ -357,6 +360,7 @@ func (c *Client) onInput(dc *webrtc.DataChannel, data []byte) {
 			return
 		}
 	}
+	c.noteActivity(m)
 	switch m.Type {
 	case protocol.MsgPing:
 		_ = dc.Send(protocol.EncodePong(m.Ping))
@@ -387,6 +391,27 @@ func (c *Client) onInput(dc *webrtc.DataChannel, data []byte) {
 	}
 }
 
+// noteActivity records real use of the mouse, keyboard or a controller
+// (automatic updates wait while someone is playing). Browsers repeat an
+// unchanged controller state as a heartbeat; that is not use.
+func (c *Client) noteActivity(m protocol.Message) {
+	switch m.Type {
+	case protocol.MsgKey, protocol.MsgMouseMove, protocol.MsgMouseAbs, protocol.MsgMouseButton, protocol.MsgMouseWheel:
+		c.hub.noteActivity()
+	case protocol.MsgGamepadState:
+		c.padMu.Lock()
+		last, seen := c.padLast[m.Index]
+		if c.padLast == nil {
+			c.padLast = map[uint8]protocol.GamepadState{}
+		}
+		c.padLast[m.Index] = m.Gamepad
+		c.padMu.Unlock()
+		if !seen || last != m.Gamepad {
+			c.hub.noteActivity()
+		}
+	}
+}
+
 // noteInjectErr logs failed input at most every 10 seconds: while Windows
 // shows a protected screen every mouse move fails, hundreds per second.
 func (c *Client) noteInjectErr(typ byte, err error) {
@@ -408,14 +433,24 @@ func (c *Client) noteInjectErr(typ byte, err error) {
 	c.injLast, c.injSuppressed = time.Now(), 0
 }
 
-// drainRTCP reads and discards RTCP from a sender so the interceptors keep
-// running (NACK, receiver reports, TWCC feedback).
-func drainRTCP(log *slog.Logger, s *webrtc.RTPSender) {
+// drainRTCP reads RTCP from a sender so the interceptors keep running
+// (NACK, receiver reports, TWCC feedback). onKeyframe, if set, is called
+// when the viewer asks for a keyframe (PLI or FIR).
+func drainRTCP(log *slog.Logger, s *webrtc.RTPSender, onKeyframe func()) {
 	defer safe.Recover(log, "rtcp reader")
-	buf := make([]byte, 1500)
 	for {
-		if _, _, err := s.Read(buf); err != nil {
+		pkts, _, err := s.ReadRTCP()
+		if err != nil {
 			return
+		}
+		if onKeyframe == nil {
+			continue
+		}
+		for _, p := range pkts {
+			switch p.(type) {
+			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
+				onKeyframe()
+			}
 		}
 	}
 }
