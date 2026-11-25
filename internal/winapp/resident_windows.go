@@ -33,14 +33,16 @@ type platform struct {
 	panelURL    string
 }
 
-// PanelReady records the dashboard address for the tray and for the
-// launcher (which reads it from the registry; it cannot read ProgramData).
+// PanelReady records, for the launcher (which reads the registry; it
+// cannot read ProgramData), that this version is up and its window can be
+// asked for. url is the browser dashboard's address, if there is one.
 func (p *platform) PanelReady(url string) {
 	p.mu.Lock()
 	p.panelURL = url
 	p.mu.Unlock()
 	if k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, appRegKey, registry.SET_VALUE); err == nil {
 		_ = k.SetStringValue("PanelURL", url)
+		_ = k.SetStringValue("RunningVersion", Version)
 		k.Close()
 	}
 }
@@ -151,7 +153,7 @@ func Resident() error {
 		systray.SetIcon(trayIcon)
 		systray.SetTitle("Windstream")
 		systray.SetTooltip("Windstream – starting")
-		mOpen := systray.AddMenuItem("Open Windstream", "Open the dashboard")
+		mOpen := systray.AddMenuItem("Open Windstream", "Open the Windstream window")
 		mLink := systray.AddMenuItem("Open my stream link", "Open the address you play from")
 		mLogs := systray.AddMenuItem("Open logs folder", "Show Windstream's log files")
 		systray.AddSeparator()
@@ -193,13 +195,9 @@ func Resident() error {
 	return nil
 }
 
-// openPanel opens the dashboard, but only if it is Windstream answering at
-// the saved address; otherwise it explains instead of sending the user to
-// whatever else might be listening there.
+// openPanel shows the Windstream window (or explains why it can't yet).
 func openPanel() {
-	url := PanelURL()
-	if runningVersion(url) != "" {
-		openURL(url)
+	if ShowPanel() == nil {
 		return
 	}
 	go messageBox("Windstream is still starting (or restarting after a problem). Try again in a few seconds.\n\nIf this keeps happening, use \"Open logs folder\" in the tray menu.", mbOK|mbIconInfo)

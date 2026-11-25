@@ -99,6 +99,22 @@ func (a *Authenticator) Authenticate(username, password, code string) Result {
 	return OK
 }
 
+// CheckPassword reports whether password is username's, without the
+// authenticator code: for the control panel on the computer itself, which
+// is only reachable by someone already signed in to it.
+func (a *Authenticator) CheckPassword(username, password string) bool {
+	username = a.Canonical(username)
+	a.umu.RLock()
+	u, ok := a.users[username]
+	a.umu.RUnlock()
+	if !ok {
+		BurnVerify(password)
+		return false
+	}
+	match, err := VerifyPassword(u.PasswordHash, password)
+	return err == nil && match
+}
+
 // HasUser reports whether username is configured (in any letter case).
 func (a *Authenticator) HasUser(username string) bool {
 	a.umu.RLock()

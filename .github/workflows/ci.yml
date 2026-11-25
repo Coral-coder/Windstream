@@ -37,6 +37,11 @@ jobs:
       - name: Smoke test (CLI attaches to the console)
         shell: bash
         run: ./Windstream.exe version
+      - name: The Windstream window opens and shows the control panel (WebView2)
+        shell: bash
+        env:
+          WINDSTREAM_TEST_WINDOW: "1"
+        run: WINDSTREAM_TEST_EXE="$PWD/Windstream.exe" go test -run 'TestPanelWindowShowsControlPanel|TestPanelProcessOverPipe' -v ./internal/winapp
 
   macos:
     name: build Windstream.app (macOS)

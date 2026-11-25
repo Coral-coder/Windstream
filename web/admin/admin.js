@@ -8,7 +8,30 @@ let settingsDirty = false;
 
 let lastState = null; // latest /api/state, for the troubleshooting buttons
 
+// copyText copies to the clipboard; the Windstream window's page has no
+// secure origin for navigator.clipboard, so it falls back to a selection.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return; } catch { /* fall back */ }
+  const t = document.createElement('textarea');
+  t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
+  document.body.append(t); t.select();
+  const ok = document.execCommand('copy');
+  t.remove();
+  if (!ok) throw new Error('copy failed');
+}
+
+// In the Windstream window (no local server) calls go straight to the app
+// through window.windstreamCall; in a browser (development) over HTTP.
+const inApp = typeof window.windstreamCall === 'function';
+
 async function api(path, body) {
+  if (inApp) {
+    const r = await window.windstreamCall(body === undefined ? 'GET' : 'POST', path, body === undefined ? '' : JSON.stringify(body));
+    let data = {};
+    try { data = JSON.parse(r.body); } catch { /* empty */ }
+    if (r.status >= 400) throw new Error(data.error || `Error ${r.status}`);
+    return data;
+  }
   const res = await fetch(path, {
     method: body === undefined ? 'GET' : 'POST',
     headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
@@ -61,7 +84,7 @@ $('#form-login').addEventListener('submit', (ev) => {
   ev.preventDefault();
   submitting(ev.target, async (fd) => {
     try {
-      await api('/api/login', { username: fd.get('username'), password: fd.get('password'), code: fd.get('code') });
+      await api('/api/login', { username: fd.get('username'), password: fd.get('password') });
     } catch (e) {
       if (e.message === 'totp_required') throw new Error('Enter the code from your authenticator app');
       throw e;
@@ -75,7 +98,7 @@ $('#btn-logout').addEventListener('click', async () => { await api('/api/logout'
 // ---------- dashboard ----------
 $('#btn-copy').addEventListener('click', async () => {
   const link = $('#link').href;
-  try { await navigator.clipboard.writeText(link); $('#btn-copy').textContent = 'Copied ✓'; } catch { /* ignore */ }
+  try { await copyText(link); $('#btn-copy').textContent = 'Copied ✓'; } catch { /* ignore */ }
   setTimeout(() => { $('#btn-copy').textContent = 'Copy'; }, 1500);
 });
 $('#btn-net').addEventListener('click', async () => { await api('/api/network/refresh', {}); });
@@ -349,10 +372,34 @@ function logsNote(text, isError = false) {
   n.classList.toggle('hidden', !text);
   if (text) setTimeout(() => { if (n.textContent === text) n.classList.add('hidden'); }, 6000);
 }
-$('#btn-logs-zip').addEventListener('click', () => {
-  location.href = '/api/logs.zip'; // served as an attachment: the page stays put
-  logsNote('Downloading… check your Downloads folder.');
+$('#btn-logs-zip').addEventListener('click', async () => {
+  if (!inApp) {
+    location.href = '/api/logs.zip'; // served as an attachment: the page stays put
+    logsNote('Downloading… check your Downloads folder.');
+    return;
+  }
+  try {
+    const r = await window.windstreamCall('GET', '/api/logs.zip', '');
+    if (r.status >= 400 || !r.base64) throw new Error('Could not collect the logs');
+    const bytes = Uint8Array.from(atob(r.body), (c) => c.charCodeAt(0));
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+    a.download = r.filename || 'windstream-logs.zip';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    logsNote('Saved to your Downloads folder.');
+  } catch (e) { logsNote(e.message, true); }
 });
+
+// Links open in the browser, not inside the Windstream window.
+if (inApp) {
+  document.addEventListener('click', (ev) => {
+    const a = ev.target.closest && ev.target.closest('a[href]');
+    if (!a || a.hasAttribute('download') || !/^https?:/i.test(a.href)) return;
+    ev.preventDefault();
+    window.windstreamOpen(a.href);
+  });
+}
 $('#btn-logs-open').addEventListener('click', async () => {
   try {
     await api('/api/logs/open', {});
@@ -364,7 +411,7 @@ $('#btn-logs-copy').addEventListener('click', async () => {
   const text = [`Windstream ${s.version || ''}`, s.last_crash ? `Last crash: ${s.last_crash}` : '', ...(s.logs || []).slice(-200)]
     .filter(Boolean).join('\n');
   try {
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     logsNote('Copied the last 200 log lines ✓');
   } catch {
     logsNote('Copy failed; use Download logs instead.', true);

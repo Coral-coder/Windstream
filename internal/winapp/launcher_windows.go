@@ -4,10 +4,12 @@ package winapp
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 	"net/http"
 	"os"
@@ -52,16 +54,62 @@ func PanelURL() string {
 // DefaultPanelURL is used before Windstream has ever started.
 const DefaultPanelURL = "http://127.0.0.1:47333/"
 
-// Launch is what happens on double-click: open the dashboard if Windstream
-// is running; otherwise install/update (one UAC prompt), start it, and open
-// the dashboard once it is up.
+// runningApp returns the version of the Windstream running on this PC, or
+// "". Versions with the Windstream window record it in the registry; older
+// ones answer on their browser dashboard.
+func runningApp() string {
+	if !residentRunning() {
+		return ""
+	}
+	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, appRegKey, registry.QUERY_VALUE); err == nil {
+		v, _, verr := k.GetStringValue("RunningVersion")
+		k.Close()
+		if verr == nil && v != "" {
+			return v
+		}
+	}
+	return runningVersion(PanelURL())
+}
+
+// residentRunning reports whether the tray app (and with it the server)
+// is running in this session. Its mutex belongs to an elevated process, so
+// an unelevated launcher is refused access to it, which says just as well
+// that it exists.
+func residentRunning() bool {
+	name, _ := windows.UTF16PtrFromString(residentMutex)
+	m, err := windows.OpenMutex(windows.SYNCHRONIZE, false, name)
+	if err == nil {
+		windows.CloseHandle(m)
+		return true
+	}
+	return errors.Is(err, windows.ERROR_ACCESS_DENIED)
+}
+
+// openRunning shows the running Windstream: its window, or for an older
+// version still running, its browser dashboard.
+func openRunning() {
+	for i := 0; i < 40; i++ {
+		if ShowPanel() == nil {
+			return
+		}
+		if url := PanelURL(); url != "" && runningVersion(url) != "" {
+			openURL(url)
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	messageBox("Windstream is still starting. Try again in a few seconds.", mbOK|mbIconInfo)
+}
+
+// Launch is what happens on double-click: show Windstream if it is
+// running; otherwise install/update (one UAC prompt), start it, and show
+// its window once it is up.
 func Launch() error {
-	panelURL := PanelURL()
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	running := runningVersion(panelURL)
+	running := runningApp()
 	// Never downgrade: an old copy of Windstream.exe (e.g. an earlier
 	// download) opens the newer installed version instead of replacing it.
 	// An older version cannot read settings written by a newer one.
@@ -73,7 +121,7 @@ func Launch() error {
 		if _, err := os.Stat(InstalledExe); err == nil || running != "" {
 			messageBox(fmt.Sprintf("This is an older copy of Windstream (%s). Windstream %s is already installed, so that is being opened instead.\n\nYou can delete this older file.", Version, newest), mbOK|mbIconInfo)
 			if running != "" {
-				openURL(panelURL)
+				openRunning()
 				return nil
 			}
 			return exec.Command(InstalledExe).Start()
@@ -83,7 +131,7 @@ func Launch() error {
 	// Already running: just open it, unless this exe is a different version
 	// (then fall through and upgrade in place).
 	if running != "" && (running == Version || samePath(self, InstalledExe)) {
-		openURL(panelURL)
+		openRunning()
 		return nil
 	}
 	sid, err := currentUserSID()
@@ -108,9 +156,7 @@ func Launch() error {
 		}
 	}
 	for deadline := time.Now().Add(60 * time.Second); time.Now().Before(deadline); time.Sleep(500 * time.Millisecond) {
-		// The app may have moved the dashboard to a free port: re-read it.
-		if url := PanelURL(); runningVersion(url) == Version {
-			openURL(url)
+		if runningApp() == Version && ShowPanel() == nil {
 			return nil
 		}
 	}

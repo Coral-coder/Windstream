@@ -398,7 +398,9 @@ func (p *panel) handleSetupFinish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *panel) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Username, Password, Code string }
+	// Password only: the control panel is reachable only on this computer.
+	// The authenticator code guards signing in to stream from elsewhere.
+	var req struct{ Username, Password string }
 	if err := decode(r, &req); err != nil {
 		jsonErr(w, http.StatusBadRequest, "Bad request")
 		return
@@ -408,15 +410,12 @@ func (p *panel) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := p.c.auth.Canonical(strings.TrimSpace(req.Username))
-	switch p.c.auth.Authenticate(name, req.Password, req.Code) {
-	case auth.OK:
-		p.setCookie(w, name)
-		jsonOK(w, map[string]bool{"ok": true})
-	case auth.TOTPRequired:
-		jsonErr(w, http.StatusUnauthorized, "totp_required")
-	default:
-		jsonErr(w, http.StatusUnauthorized, "Wrong username, password or code")
+	if !p.c.auth.CheckPassword(name, req.Password) {
+		jsonErr(w, http.StatusUnauthorized, "Wrong username or password")
+		return
 	}
+	p.setCookie(w, name)
+	jsonOK(w, map[string]bool{"ok": true})
 }
 
 func (p *panel) handleLogout(w http.ResponseWriter, r *http.Request) {

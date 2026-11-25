@@ -25,6 +25,9 @@ func platformMain(args []string) bool {
 	case args[0] == "--update":
 		// Started by the update task with a newly downloaded exe.
 		err = winapp.UpdateFromArgs(args[1:])
+	case args[0] == "--panel":
+		// The Windstream window, started by the server (see winapp).
+		err = winapp.PanelWindow()
 	case args[0] == "--run":
 		// Tray + supervisor; the server itself runs in a --worker child
 		// that is restarted automatically if it ever crashes.

@@ -337,13 +337,9 @@ func (c *Controller) httpsError() string {
 	return ""
 }
 
-// Run blocks until ctx is cancelled.
-func (c *Controller) Run(ctx context.Context) error {
-	c.runCtx = ctx
-	if err := c.ensurePorts(); err != nil {
-		return err
-	}
-	c.panel = newPanel(c)
+// servePanel serves the dashboard on its loopback port (the browser
+// dashboard: development, and platforms without a window of their own).
+func (c *Controller) servePanel(ctx context.Context, panelErr chan<- error) error {
 	ln, err := c.panel.listen()
 	if err != nil && c.opts.PanelAddr == "" {
 		// Something grabbed the port since it was checked: move once more.
@@ -352,13 +348,13 @@ func (c *Controller) Run(ctx context.Context) error {
 		if p, perr := netx.PickPort(netx.LoopbackTCPFree, []int{47334, 47335, 47336, 47337, 47338, 47339}, cfg.ListenPort(), cfg.WebRTC.TCPPort); perr == nil {
 			c.panelAddr = fmt.Sprintf("127.0.0.1:%d", p)
 			_ = c.update(func(cf *config.Config) error { cf.Server.PanelPort = p; return nil })
+			c.panel = newPanel(c)
 			ln, err = c.panel.listen()
 		}
 	}
 	if err != nil {
 		return err
 	}
-	panelErr := make(chan error, 1)
 	go func() {
 		defer safe.Recover(c.log, "dashboard server")
 		panelErr <- c.panel.serve(ctx, ln)
@@ -368,7 +364,25 @@ func (c *Controller) Run(ctx context.Context) error {
 	if c.opts.Platform != nil {
 		c.opts.Platform.PanelReady(c.PanelURL())
 	}
+	return nil
+}
 
+// Run blocks until ctx is cancelled.
+func (c *Controller) Run(ctx context.Context) error {
+	c.runCtx = ctx
+	if err := c.ensurePorts(); err != nil {
+		return err
+	}
+	c.panel = newPanel(c)
+	panelErr := make(chan error, 1)
+	if host, ok := c.opts.Platform.(PanelHost); ok && !c.opts.Dev && c.opts.PanelAddr == "" {
+		// The platform shows the control panel in its own window: no
+		// dashboard port is opened at all.
+		host.HostPanel(newPanelBridge(c.panel))
+		c.opts.Platform.PanelReady("")
+	} else if err := c.servePanel(ctx, panelErr); err != nil {
+		return err
+	}
 	c.restartHTTPS()
 	c.restartNetwork()
 
