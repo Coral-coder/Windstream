@@ -190,7 +190,9 @@ func PanelWindow() error {
 				w.Dispatch(func() { bringToFront(hwnd) })
 			}
 		})
-		w.Terminate() // the server stopped (quit, update, uninstall)
+		// The server stopped (quit, update, uninstall). Terminate only
+		// works on the window's own thread.
+		w.Dispatch(w.Terminate)
 	}()
 	w.SetHtml(page)
 	bringToFront(hwnd)

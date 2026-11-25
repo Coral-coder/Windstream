@@ -22,6 +22,8 @@ type platformState struct {
 	device         string // GDI name of the streamed display
 	origPrimary    string
 	changedPrimary bool
+	origMode       Mode // the streamed display's own mode, while changedMode
+	changedMode    bool // Fit switched it to a smaller mode
 }
 
 // savedState survives a hard kill (Task Scheduler "End" terminates the
@@ -29,6 +31,7 @@ type platformState struct {
 type savedState struct {
 	WeEnabledVDD bool   `json:"we_enabled_vdd"`
 	OrigPrimary  string `json:"orig_primary"`
+	ModeDevice   string `json:"mode_device,omitempty"` // display Fit changed
 }
 
 func statePath() string {
@@ -52,7 +55,10 @@ func (m *Manager) saveState() {
 	if m.state.changedPrimary {
 		st.OrigPrimary = m.state.origPrimary
 	}
-	if !st.WeEnabledVDD && st.OrigPrimary == "" {
+	if m.state.changedMode {
+		st.ModeDevice = m.state.device
+	}
+	if !st.WeEnabledVDD && st.OrigPrimary == "" && st.ModeDevice == "" {
 		_ = os.Remove(statePath())
 		return
 	}
@@ -64,6 +70,10 @@ func (m *Manager) saveState() {
 
 func (m *Manager) startPlatform(ctx context.Context) error {
 	prev := loadState()
+	if prev.ModeDevice != "" {
+		m.log.Info("restoring a display mode left by an unclean shutdown", "device", prev.ModeDevice)
+		_ = restoreMode(prev.ModeDevice)
+	}
 	if prev.WeEnabledVDD || prev.OrigPrimary != "" {
 		m.log.Info("recovering display state from an unclean shutdown", "orig_primary", prev.OrigPrimary)
 		m.state.weEnabledVDD = prev.WeEnabledVDD
@@ -203,7 +213,12 @@ func (m *Manager) targetPlatform() (Target, error) {
 
 func (m *Manager) recoverPlatform() {
 	prev := loadState()
+	if prev.ModeDevice != "" {
+		m.log.Info("restoring a display mode left by an unclean shutdown", "device", prev.ModeDevice)
+		_ = restoreMode(prev.ModeDevice)
+	}
 	if !prev.WeEnabledVDD && prev.OrigPrimary == "" {
+		m.saveState()
 		return
 	}
 	m.log.Info("undoing display changes left by an unclean shutdown",
@@ -221,7 +236,62 @@ func (m *Manager) recoverPlatform() {
 	m.stopPlatform()
 }
 
+// fitPlatform: see Manager.Fit.
+func (m *Manager) fitPlatform(maxW, maxH int) (Mode, error) {
+	dev := m.state.device
+	if dev == "" {
+		return Mode{}, fmt.Errorf("display: not started")
+	}
+	if !m.state.changedMode {
+		cm, err := currentMode(dev)
+		if err != nil {
+			return Mode{}, err
+		}
+		m.state.origMode = Mode{int(cm.PelsWidth), int(cm.PelsHeight), int(cm.DisplayFrequency)}
+	}
+	orig := m.state.origMode
+	target, ok := FitMode(enumModes(dev), orig, maxW, maxH)
+	if !ok {
+		m.log.Warn("the screen has no mode small enough for the viewer's limit; streaming it as it is",
+			"device", dev, "limit", fmt.Sprintf("%dx%d", maxW, maxH))
+		target = orig
+	}
+	if target == orig {
+		if m.state.changedMode {
+			if err := restoreMode(dev); err != nil {
+				return Mode{}, err
+			}
+			m.state.changedMode = false
+			m.saveState()
+			m.log.Info("screen back to its own resolution", "device", dev, "mode", modeString(orig))
+		}
+		return orig, nil
+	}
+	var dm devMode
+	dm.Fields = dmPelsWidth | dmPelsHeight | dmDisplayFrequency
+	dm.PelsWidth, dm.PelsHeight, dm.DisplayFrequency = uint32(target.Width), uint32(target.Height), uint32(target.Refresh)
+	// No CDS_UPDATEREGISTRY: a temporary change Windows does not keep.
+	if err := changeSettings(dev, &dm, 0); err != nil {
+		return Mode{}, fmt.Errorf("switch %s to %s: %w", dev, modeString(target), err)
+	}
+	m.state.changedMode = true
+	m.saveState()
+	m.log.Info("screen switched to fit the viewer", "device", dev, "mode", modeString(target),
+		"own_mode", modeString(orig), "limit", fmt.Sprintf("%dx%d", maxW, maxH))
+	return target, nil
+}
+
+func modeString(m Mode) string { return fmt.Sprintf("%dx%d@%d", m.Width, m.Height, m.Refresh) }
+
 func (m *Manager) stopPlatform() {
+	if m.state.changedMode {
+		if err := restoreMode(m.state.device); err != nil {
+			m.log.Warn("restoring the screen's resolution failed", "error", err)
+		} else {
+			m.log.Info("screen back to its own resolution", "device", m.state.device, "mode", modeString(m.state.origMode))
+		}
+		m.state.changedMode = false
+	}
 	if m.state.changedPrimary && m.state.origPrimary != "" {
 		if outs, err := List(); err == nil {
 			if err := makePrimary(m.state.origPrimary, outs); err != nil {

@@ -125,6 +125,33 @@ func currentMode(device string) (devMode, error) {
 	return dm, nil
 }
 
+// enumModes lists the 32-bit colour modes a display supports.
+func enumModes(device string) []Mode {
+	name, err := windows.UTF16PtrFromString(device)
+	if err != nil {
+		return nil
+	}
+	seen := map[Mode]bool{}
+	var out []Mode
+	for i := uint32(0); i < 4096; i++ {
+		var dm devMode
+		dm.Size = uint16(unsafe.Sizeof(dm))
+		if r, _, _ := procEnumDisplaySettingsExW.Call(uintptr(unsafe.Pointer(name)), uintptr(i), uintptr(unsafe.Pointer(&dm)), 0); r == 0 {
+			break
+		}
+		m := Mode{int(dm.PelsWidth), int(dm.PelsHeight), int(dm.DisplayFrequency)}
+		if dm.BitsPerPel == 32 && !seen[m] {
+			seen[m] = true
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// restoreMode returns a display to the mode saved in the registry (its
+// own), undoing a temporary change.
+func restoreMode(device string) error { return changeSettings(device, nil, 0) }
+
 func changeSettings(device string, dm *devMode, flags uint32) error {
 	var namePtr uintptr
 	if device != "" {

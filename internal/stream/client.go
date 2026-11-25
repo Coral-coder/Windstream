@@ -33,6 +33,11 @@ type SignalMessage struct {
 	// codec being streamed.
 	Codecs []string `json:"codecs,omitempty"`
 	Codec  string   `json:"codec,omitempty"`
+	// MaxWidth/MaxHeight (hello or "limit", client -> server): the
+	// largest picture this viewer wants; the PC's screen switches to fit
+	// while they watch. 0 = no limit.
+	MaxWidth  int `json:"max_width,omitempty"`
+	MaxHeight int `json:"max_height,omitempty"`
 }
 
 // InputCaps tells the client which device classes the server accepts.
@@ -78,6 +83,7 @@ type Client struct {
 	done       chan struct{}
 
 	// Failed input is logged at most every 10 seconds.
+	maxW, maxH    int // the viewer's max resolution (guarded by hub.mu)
 	padMu         sync.Mutex
 	padLast       map[uint8]protocol.GamepadState // to tell real controller use from heartbeats
 	injMu         sync.Mutex
@@ -299,9 +305,13 @@ func (c *Client) HandleSignal(m SignalMessage) error {
 		defer c.sigMu.Unlock()
 		return c.pc.AddICECandidate(*m.Candidate)
 	case "hello":
+		c.hub.setViewerLimit(c, m.MaxWidth, m.MaxHeight)
 		if err := c.start(m.Codecs); err != nil && !errors.Is(err, errStarted) {
 			return err
 		}
+		return nil
+	case "limit": // the viewer changed their max resolution
+		c.hub.setViewerLimit(c, m.MaxWidth, m.MaxHeight)
 		return nil
 	case "bye":
 		c.Close()

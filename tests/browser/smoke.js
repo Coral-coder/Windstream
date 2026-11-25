@@ -103,6 +103,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const frames = await sp.evaluate(() => document.querySelector('#video').getVideoPlaybackQuality().totalVideoFrames).catch(() => 0);
     const back = await sp.waitForFunction((f) => { const v = document.querySelector('#video'); return v && v.videoWidth > 0 && v.getVideoPlaybackQuality().totalVideoFrames > f + 30; }, frames, { timeout: 60000 }).then(() => true, () => false);
     check(back && await sp.isHidden('#login'), `stream resumed by itself after a restart (${((Date.now() - down) / 1000).toFixed(1)} s)`);
+
+    // ---- a phone (landscape): touch UI, fits the screen, plays
+    const phone = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 844, height: 390 },
+      deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    phone.on('page', (p) => p.on('pageerror', (e) => errors.push('phone: ' + e.message)));
+    const mp = await phone.newPage();
+    await mp.goto('https://127.0.0.1:8443/');
+    await nextWindow();
+    await mp.fill('#login-form [name=username]', 'player');
+    await mp.fill('#login-form [name=password]', 'correct-horse-battery');
+    await mp.tap('#login-form button');
+    await mp.waitForSelector('#totp-row:not(.hidden)');
+    await mp.fill('#login-form [name=code]', totp(secret));
+    await mp.tap('#login-form button');
+    await mp.waitForFunction(() => document.querySelector('#video').videoWidth > 0, null, { timeout: 30000 });
+    check(true, 'phone: video playing');
+    // The keyboard button shows when the PC takes keyboard input (not on
+    // the Linux development server, which is view-only).
+    const viewOnly = fs.readFileSync(path.join(data, 'server.log'), 'utf8').includes('view-only');
+    check(await mp.isVisible('#btn-keyboard') !== viewOnly, `phone: keyboard button ${viewOnly ? 'hidden (view-only server)' : 'shown'}`);
+    check(await mp.isHidden('#btn-mouse'), 'phone: no mouse-capture button');
+    check(await mp.inputValue('#sel-res') === 'auto', 'phone: max resolution defaults to this screen');
+    const fits = await mp.evaluate(() => document.querySelector('#toolbar').scrollWidth <= window.innerWidth);
+    check(fits, 'phone: toolbar fits the screen');
+    await mp.tap('#video'); // a tap is a click on the PC (view-only here: must not break anything)
+    await mp.selectOption('#sel-res', '720');
+    await mp.waitForTimeout(1500);
+    check(await mp.evaluate(() => document.querySelector('#video').videoWidth > 0), 'phone: still streaming after choosing 720p');
+    await mp.screenshot({ path: path.join(data, 'phone.png') });
+    await phone.close();
     check(errors.length === 0, 'no page errors ' + JSON.stringify(errors));
   } catch (e) {
     check(false, 'unexpected: ' + e.message);

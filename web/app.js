@@ -131,7 +131,7 @@ function connect() {
   state.ws = ws;
   ws.onopen = async () => {
     const codecs = await codecsReady;
-    if (state.ws === ws) signal({ type: 'hello', codecs });
+    if (state.ws === ws) { const [w, h] = maxResolution(); signal({ type: 'hello', codecs, max_width: w, max_height: h }); }
   };
   // Handle signaling messages strictly in order: a candidate must not be
   // applied while the offer before it is still being processed.
@@ -180,7 +180,7 @@ async function handleSignal(msg) {
   switch (msg.type) {
     case 'config': {
       state.caps = msg.input || null;
-      updateMouseButton();
+      updateMouseButton(); updateTouchUI();
       createPeer(msg.iceServers || []);
       break;
     }
@@ -469,7 +469,10 @@ function sendPoint(ev) {
 const freeMouse = () => !state.captureMouse && !state.pointerLocked && mouseAllowed();
 ui.stage.addEventListener('pointermove', (ev) => { if (freeMouse()) sendPoint(ev); });
 
+let lastPointer = 'mouse';
+ui.stage.addEventListener('pointerdown', (ev) => { lastPointer = ev.pointerType; }, true);
 ui.stage.addEventListener('click', () => {
+  if (lastPointer === 'touch') return; // touch has its own gestures (below)
   if (state.captureMouse && state.caps && state.caps.mouse && !state.pointerLocked && ui.stage.requestPointerLock) {
     ui.stage.requestPointerLock({ unadjustedMovement: true }).catch?.(() => ui.stage.requestPointerLock());
   }
@@ -590,3 +593,149 @@ async function updateStats() {
 }
 
 boot();
+
+// ---------- max resolution ----------
+// The largest picture this viewer wants. The PC's screen switches to the
+// largest mode that fits while they watch and back afterwards, so nothing
+// is scaled: sharper text and fewer bits. "This screen" is this device's
+// screen in pixels, held sideways (landscape) as for streaming.
+const RESOLUTIONS = { 2160: [3840, 2160], 1440: [2560, 1440], 1080: [1920, 1080], 720: [1280, 720], none: [0, 0] };
+function resolutionChoice() {
+  try { return localStorage.getItem('ws.maxRes') || 'auto'; } catch { return 'auto'; }
+}
+function maxResolution() {
+  const v = resolutionChoice();
+  if (v !== 'auto') return RESOLUTIONS[v] || [0, 0];
+  const d = window.devicePixelRatio || 1;
+  const a = Math.round(screen.width * d), b = Math.round(screen.height * d);
+  return [Math.max(a, b), Math.min(a, b)];
+}
+const resSelect = $('#sel-res');
+resSelect.value = resolutionChoice();
+resSelect.addEventListener('change', () => {
+  try { localStorage.setItem('ws.maxRes', resSelect.value); } catch { /* private mode */ }
+  const [w, h] = maxResolution();
+  signal({ type: 'limit', max_width: w, max_height: h });
+  toast(w ? `Streaming at most ${w}×${h}` : 'Streaming the PC screen at its own resolution');
+  resSelect.blur(); // keys go to the PC again
+});
+
+// ---------- touch (phones and tablets) ----------
+// Tap clicks where you tap; drag drags (left button held); a long press
+// or a two-finger tap right-clicks; two fingers dragged scroll.
+const touchDevice = window.matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+const touches = new Map(); // pointerId -> {x, y}
+let touch = null; // the current gesture
+function sendButton(button, down) {
+  if (down) state.buttons.add(button); else state.buttons.delete(button);
+  sendControl(new Uint8Array([MSG.MOUSE_BUTTON, button, down ? 1 : 0]));
+}
+function tapButton(button) { sendButton(button, true); sendButton(button, false); }
+function midpoint() {
+  let x = 0, y = 0;
+  for (const p of touches.values()) { x += p.x; y += p.y; }
+  return { x: x / touches.size, y: y / touches.size };
+}
+ui.stage.addEventListener('pointerdown', (ev) => {
+  if (ev.pointerType !== 'touch' || !mouseAllowed()) return;
+  ev.preventDefault(); // no emulated mouse events, no browser gestures
+  touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  if (touches.size === 1) {
+    if (!sendPoint(ev)) { touches.delete(ev.pointerId); return; }
+    touch = { x: ev.clientX, y: ev.clientY, dragging: false, fingers: 1, moved: false, long: false };
+    touch.timer = setTimeout(() => {
+      if (touch && !touch.dragging && touch.fingers === 1) { touch.long = true; tapButton(2); navigator.vibrate?.(15); }
+    }, 550);
+  } else if (touch) {
+    clearTimeout(touch.timer);
+    if (touch.dragging) { sendButton(0, false); touch.dragging = false; }
+    touch.fingers = Math.max(touch.fingers, touches.size);
+    touch.scroll = midpoint();
+  }
+});
+ui.stage.addEventListener('pointermove', (ev) => {
+  if (ev.pointerType !== 'touch' || !touches.has(ev.pointerId) || !touch) return;
+  ev.preventDefault();
+  touches.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  if (touch.fingers >= 2) {
+    const m = midpoint();
+    const dx = m.x - touch.scroll.x, dy = m.y - touch.scroll.y;
+    const step = 24; // CSS pixels of finger travel per wheel notch
+    if (Math.abs(dx) >= step || Math.abs(dy) >= step) {
+      const dv = new DataView(new ArrayBuffer(5));
+      dv.setUint8(0, MSG.MOUSE_WHEEL);
+      dv.setInt16(1, -Math.trunc(dx / step), true);
+      dv.setInt16(3, Math.trunc(dy / step), true);
+      sendMotion(dv.buffer);
+      touch.scroll = m; touch.moved = true;
+    }
+    return;
+  }
+  if (!touch.dragging && Math.hypot(ev.clientX - touch.x, ev.clientY - touch.y) > 10) {
+    clearTimeout(touch.timer);
+    if (touch.long) return;
+    touch.dragging = true;
+    sendButton(0, true);
+  }
+  if (touch.dragging) sendPoint(ev);
+});
+function touchEnd(ev) {
+  if (ev.pointerType !== 'touch' || !touches.delete(ev.pointerId) || !touch) return;
+  ev.preventDefault();
+  if (touches.size > 0) return;
+  clearTimeout(touch.timer);
+  if (touch.dragging) sendButton(0, false);
+  else if (touch.fingers >= 2) { if (!touch.moved) tapButton(2); }
+  else if (!touch.long) tapButton(0);
+  touch = null;
+}
+ui.stage.addEventListener('pointerup', touchEnd);
+ui.stage.addEventListener('pointercancel', touchEnd);
+
+// ---------- on-screen keyboard ----------
+// Phones type through a hidden text field; each character becomes the key
+// presses a US keyboard would make.
+const kbd = $('#kbd');
+const SHIFTED = { '!': 'Digit1', '@': 'Digit2', '#': 'Digit3', $: 'Digit4', '%': 'Digit5', '^': 'Digit6', '&': 'Digit7',
+  '*': 'Digit8', '(': 'Digit9', ')': 'Digit0', _: 'Minus', '+': 'Equal', '{': 'BracketLeft', '}': 'BracketRight',
+  '|': 'Backslash', ':': 'Semicolon', '"': 'Quote', '<': 'Comma', '>': 'Period', '?': 'Slash', '~': 'Backquote' };
+const PLAIN = { ' ': 'Space', '-': 'Minus', '=': 'Equal', '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash',
+  ';': 'Semicolon', "'": 'Quote', ',': 'Comma', '.': 'Period', '/': 'Slash', '`': 'Backquote', '\n': 'Enter' };
+function typeChar(ch) {
+  let code = PLAIN[ch], shift = false;
+  if (!code && /[a-z]/.test(ch)) code = 'Key' + ch.toUpperCase();
+  else if (!code && /[A-Z]/.test(ch)) { code = 'Key' + ch; shift = true; }
+  else if (!code && /[0-9]/.test(ch)) code = 'Digit' + ch;
+  else if (!code && SHIFTED[ch]) { code = SHIFTED[ch]; shift = true; }
+  if (!code) return;
+  if (shift) sendKey('ShiftLeft', true);
+  sendKey(code, true); sendKey(code, false);
+  if (shift) sendKey('ShiftLeft', false);
+}
+kbd.addEventListener('beforeinput', (ev) => {
+  ev.preventDefault(); // the field stays empty: every keystroke goes to the PC
+  if (ev.inputType === 'deleteContentBackward') { sendKey('Backspace', true); sendKey('Backspace', false); return; }
+  if (ev.inputType === 'insertLineBreak') { sendKey('Enter', true); sendKey('Enter', false); return; }
+  for (const ch of ev.data || '') typeChar(ch);
+});
+kbd.addEventListener('keydown', (ev) => {
+  // Keys an on-screen keyboard reports properly (Enter, Backspace, arrows).
+  if (['Enter', 'Backspace', 'Tab', 'Escape', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(ev.key)) {
+    ev.preventDefault(); ev.stopPropagation();
+    sendKey(ev.code || ev.key, true); sendKey(ev.code || ev.key, false);
+  } else {
+    ev.stopPropagation(); // characters arrive through beforeinput
+  }
+}, true);
+kbd.addEventListener('keyup', (ev) => ev.stopPropagation(), true);
+const kbdButton = $('#btn-keyboard');
+kbdButton.addEventListener('click', () => {
+  if (document.activeElement === kbd) kbd.blur(); else kbd.focus();
+});
+function updateTouchUI() {
+  kbdButton.classList.toggle('hidden', !touchDevice || !(state.caps && state.caps.keyboard));
+  document.body.classList.toggle('touch', touchDevice);
+  // Phones and tablets: mouse capture means nothing to a finger.
+  if (touchDevice && !window.matchMedia('(any-pointer: fine)').matches) $('#btn-mouse').classList.add('hidden');
+}
+updateTouchUI();

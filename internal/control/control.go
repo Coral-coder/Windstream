@@ -620,6 +620,11 @@ func (c *Controller) restartStack(ctx context.Context) {
 	}
 	hcfg := HubConfig(&cfg, disp, c.deps.FFmpegPath(), webrtcCfg)
 	hcfg.Acquire, hcfg.Release = lease.acquire, lease.release
+	hcfg.Fit = func(maxW, maxH int) {
+		if _, err := disp.Fit(maxW, maxH); err != nil {
+			c.log.Warn("could not switch the screen to fit the viewer; streaming it as it is", "error", err)
+		}
+	}
 	hcfg.Wake = power.WakeDisplay
 	hub, err := stream.NewHub(ctx, hcfg, c.log)
 	if err != nil {

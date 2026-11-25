@@ -46,8 +46,12 @@ func (m *Manager) targetPlatform() (Target, error) {
 	return Target{Adapter: 0, Output: pick.Output, Width: pick.Width, Height: pick.Height, Name: pick.MonitorName}, nil
 }
 
-func (m *Manager) stopPlatform()    {}
-func (m *Manager) recoverPlatform() {}
+func (m *Manager) stopPlatform() {}
+
+// fitPlatform: the Mac pipeline scales the picture instead (see
+// media.VideoConfig); the screen itself is left alone.
+func (m *Manager) fitPlatform(maxW, maxH int) (Mode, error) { return Mode{}, nil }
+func (m *Manager) recoverPlatform()                         {}
 
 // launchCommand opens links (steam://...) with the default app.
 func launchCommand(launch []string) *exec.Cmd {

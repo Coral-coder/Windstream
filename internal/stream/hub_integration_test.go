@@ -77,6 +77,10 @@ type e2eOptions struct {
 	notices chan string
 	// onDemandKeyframes leaves out periodic keyframes (the app default).
 	onDemandKeyframes bool
+	// maxW/maxH is the viewer's max resolution (hello); fit records the
+	// hub's calls to Config.Fit.
+	maxW, maxH int
+	fit        chan [2]int
 	// check runs once video flows; ssrc is the video stream's.
 	check func(t *testing.T, browser *webrtc.PeerConnection, hub *Hub, ssrc uint32)
 }
@@ -104,6 +108,7 @@ func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder str
 		InputEnabled: false,
 		MaxClients:   1,
 		StopDelay:    100 * time.Millisecond,
+		Fit:          fitFunc(opt.fit),
 	}, log)
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +255,7 @@ func runHubEndToEndWith(t *testing.T, codecs []string, wantMime, wantEncoder str
 	mu.Unlock()
 	defer c.Close()
 	if codecs != nil {
-		if err := c.HandleSignal(SignalMessage{Type: "hello", Codecs: codecs}); err != nil {
+		if err := c.HandleSignal(SignalMessage{Type: "hello", Codecs: codecs, MaxWidth: opt.maxW, MaxHeight: opt.maxH}); err != nil {
 			t.Fatal(err)
 		}
 	} // else: an old client; the hub falls back to H.264 after helloTimeout
@@ -409,4 +414,59 @@ func TestHubKeyframesOnRequest(t *testing.T) {
 		}
 	}
 	runHubEndToEndWith(t, []string{"h264"}, webrtc.MimeTypeH264, "libx264", e2eOptions{onDemandKeyframes: true, check: check})
+}
+
+func fitFunc(ch chan [2]int) func(int, int) {
+	if ch == nil {
+		return nil
+	}
+	return func(w, h int) { ch <- [2]int{w, h} }
+}
+
+func TestHubFitsTheScreenToTheViewer(t *testing.T) {
+	fit := make(chan [2]int, 8)
+	check := func(t *testing.T, browser *webrtc.PeerConnection, hub *Hub, ssrc uint32) {
+		select {
+		case got := <-fit:
+			if got != [2]int{1920, 1080} {
+				t.Fatalf("fitted to %v before capture, want the viewer's 1920x1080", got)
+			}
+		default:
+			t.Fatal("the screen was not fitted before capture started")
+		}
+		// The viewer picks 720p mid-stream: re-fit, encoder restarts.
+		hub.mu.Lock()
+		var c *Client
+		for cl := range hub.clients {
+			c = cl
+		}
+		hub.mu.Unlock()
+		before := hub.Stats().Keyframes
+		if err := c.HandleSignal(SignalMessage{Type: "limit", MaxWidth: 1280, MaxHeight: 720}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-fit:
+			if got != [2]int{1280, 720} {
+				t.Fatalf("re-fitted to %v", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("not re-fitted after the viewer changed their limit")
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for hub.Stats().Keyframes == before {
+			if time.Now().After(deadline) {
+				t.Fatal("the stream did not come back after re-fitting")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		// The same limit again changes nothing.
+		_ = c.HandleSignal(SignalMessage{Type: "limit", MaxWidth: 1280, MaxHeight: 720})
+		select {
+		case got := <-fit:
+			t.Errorf("re-fitted to an unchanged limit %v", got)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	runHubEndToEndWith(t, []string{"h264"}, webrtc.MimeTypeH264, "libx264", e2eOptions{maxW: 1920, maxH: 1080, fit: fit, check: check})
 }

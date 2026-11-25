@@ -8,6 +8,10 @@
 <title>Windstream</title>
 <link rel="icon" href="/favicon.png" type="image/png">
 <link rel="apple-touch-icon" href="/icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Windstream">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -34,11 +38,21 @@
     </div>
     <pre id="stats" class="stats hidden"></pre>
     <div id="toast" class="toast hidden" role="status"></div>
+    <input id="kbd" class="kbd" aria-label="Type on the PC" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
   </div>
   <nav id="toolbar">
     <span class="brand"><img src="/favicon.png" alt=""> Windstream</span>
     <span id="pads" class="pads" title="Connected controllers">🎮 0</span>
     <span class="spacer"></span>
+    <select id="sel-res" title="Largest picture to stream: the PC's screen switches to fit while you watch">
+      <option value="auto">This screen</option>
+      <option value="2160">4K</option>
+      <option value="1440">1440p</option>
+      <option value="1080">1080p</option>
+      <option value="720">720p</option>
+      <option value="none">No limit</option>
+    </select>
+    <button id="btn-keyboard" class="hidden" title="Keyboard">⌨</button>
     <button id="btn-mouse" class="toggle hidden" aria-pressed="true">🖱</button>
     <button id="btn-mute" title="Toggle audio">🔇</button>
     <button id="btn-stats" title="Toggle stats">📈</button>

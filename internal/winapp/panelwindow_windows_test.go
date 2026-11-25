@@ -37,7 +37,14 @@ func TestPanelWindowShowsControlPanel(t *testing.T) {
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	w := webview2.NewWithOptions(webview2.WebViewOptions{DataPath: t.TempDir(),
+	// Not t.TempDir: WebView2's helper processes release their files a
+	// little after the window closes.
+	dataDir, err := os.MkdirTemp("", "ws-webview-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dataDir)
+	w := webview2.NewWithOptions(webview2.WebViewOptions{DataPath: dataDir,
 		WindowOptions: webview2.WindowOptions{Title: "Windstream test", Width: 900, Height: 700}})
 	if w == nil {
 		t.Fatal("window not created")
@@ -95,7 +102,7 @@ func TestPanelWindowShowsControlPanel(t *testing.T) {
 	}, 200);`)
 	go func() {
 		time.Sleep(60 * time.Second)
-		w.Terminate()
+		w.Dispatch(w.Terminate)
 	}()
 	w.SetHtml(page)
 	w.Run()

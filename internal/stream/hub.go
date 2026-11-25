@@ -40,6 +40,10 @@ type Config struct {
 	// someone is streaming. Optional.
 	Acquire func(ctx context.Context) error
 	Release func()
+	// Fit switches the captured screen to fit within maxW x maxH (the
+	// smallest limit among the viewers; 0 = none), between Acquire and
+	// Release. Optional.
+	Fit func(maxW, maxH int)
 	// Wake turns a sleeping display back on. Optional.
 	Wake         func()
 	Audio        wsmedia.AudioConfig
@@ -121,6 +125,8 @@ type Hub struct {
 	// lastActivity is when a viewer last used the mouse, keyboard or a
 	// controller (or connected), UnixNano.
 	lastActivity atomic.Int64
+
+	fitWant [2]int // viewers' combined max resolution (guarded by mu)
 	// pktMu guards per-packet state: a stopped pipeline's goroutine can
 	// deliver its last packets while a restarted one begins.
 	pktMu      sync.Mutex
@@ -292,6 +298,7 @@ func (h *Hub) addClient(c *Client) error {
 func (h *Hub) removeClient(c *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	defer h.refitLocked() // a smaller limit may have left with them
 	if _, ok := h.clients[c]; !ok {
 		return
 	}
@@ -398,6 +405,7 @@ func (h *Hub) runVideo(ctx context.Context) {
 	}
 	next, lastCodec, asleep := 0, "", 0
 	blocked, forKeyframe := false, false
+	fitted := [2]int{-1, -1} // the limit the screen was last fitted to
 	for ctx.Err() == nil {
 		h.mu.Lock()
 		codec := h.codec
@@ -444,6 +452,10 @@ func (h *Hub) runVideo(ctx context.Context) {
 		h.lastErr = ""
 		h.runCancel = cancel
 		h.mu.Unlock()
+		if lim := h.fitLimit(); h.cfg.Fit != nil && lim != fitted && (fitted != [2]int{-1, -1} || lim != [2]int{}) {
+			h.cfg.Fit(lim[0], lim[1]) // before capture starts on the new mode
+			fitted = lim
+		}
 		if forKeyframe {
 			h.log.Debug("restarting the encoder for a keyframe a viewer asked for")
 		} else {
@@ -753,6 +765,42 @@ func (h *Hub) codecFailed(codec string) bool {
 	h.log.Warn("no encoder could stream this codec here; falling back", "codec", codec, "fallback", next)
 	h.switchCodecLocked(next, nil)
 	return true
+}
+
+// setViewerLimit records a viewer's max resolution and re-fits the screen
+// if that changes what the viewers together allow.
+func (h *Hub) setViewerLimit(c *Client, maxW, maxH int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	c.maxW, c.maxH = max(maxW, 0), max(maxH, 0)
+	h.refitLocked()
+}
+
+// refitLocked recomputes the viewers' combined limit (the smallest, per
+// side); when it changed while capturing, the encoder restarts and the
+// screen is switched before it does.
+func (h *Hub) refitLocked() {
+	var want [2]int
+	for cl := range h.clients {
+		for i, v := range [2]int{cl.maxW, cl.maxH} {
+			if v > 0 && (want[i] == 0 || v < want[i]) {
+				want[i] = v
+			}
+		}
+	}
+	if want == h.fitWant {
+		return
+	}
+	h.fitWant = want
+	if h.runCancel != nil && h.cfg.Fit != nil && !h.kfRestart.Swap(true) {
+		h.runCancel()
+	}
+}
+
+func (h *Hub) fitLimit() [2]int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.fitWant
 }
 
 // InputIdle reports how long no viewer has used the mouse, keyboard or a

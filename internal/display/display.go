@@ -101,6 +101,20 @@ func (m *Manager) RecoverUnclean() {
 	}
 }
 
+// Fit switches the streamed display to the largest mode no bigger than
+// maxW x maxH (0 = no limit: its own mode again), for as long as it is
+// streamed; Stop restores the original. The change is not saved by
+// Windows, so even a crash leaves it at most until the next restart of
+// Windstream (which undoes it) or of Windows. It returns the mode in use.
+func (m *Manager) Fit(maxW, maxH int) (Mode, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cfg.Mode == "test" {
+		return Mode{}, nil
+	}
+	return m.fitPlatform(maxW, maxH)
+}
+
 // Stop restores the desktop layout and turns the virtual monitor off.
 func (m *Manager) Stop() {
 	m.mu.Lock()
